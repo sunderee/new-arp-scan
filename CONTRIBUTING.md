@@ -91,9 +91,10 @@ cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
   sudo ./target/debug/new-arp-scan interfaces
   sudo ./target/debug/new-arp-scan scan --interface en0
   sudo ./target/debug/new-arp-scan scan --interface en0 --host 192.168.1.50
+  sudo ./target/debug/new-arp-scan scan --interface en0 --mac-vendor-file ieee-oui.txt
   ```
 
-  `interfaces` needs no privileges; `scan` opens `/dev/bpf*` and fails with a "run with sudo" error otherwise. Verify frames with `tcpdump -ni en0 arp` in another terminal.
+  `interfaces` needs no privileges; `scan` opens `/dev/bpf*` and fails with a "run with sudo" error otherwise. Verify frames with `tcpdump -ni en0 arp` in another terminal. Vendor annotation needs a mapping file (`make update-mac-vendors` writes `ieee-oui.txt`); a missing or invalid file fails before BPF is opened.
 
 - **Linux** (needs `CAP_NET_RAW`, typically via `sudo`): use the same commands with the appropriate interface (for example `eth0`). See [docs/linux-platform.md](docs/linux-platform.md).
 

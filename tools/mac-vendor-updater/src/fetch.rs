@@ -138,7 +138,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CURL_USER_AGENT, fetch_official_csvs_with_curl, utc_timestamp_from_program};
+    use super::{
+        CURL_USER_AGENT, fetch_official_csvs_with_curl, utc_timestamp_from_date,
+        utc_timestamp_from_program,
+    };
     use crate::error::UpdaterError;
     use crate::registry::IeeeMacRegistry;
     use std::fs;
@@ -345,6 +348,41 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         // Assert
         assert_eq!(timestamp, "2026-09-17T12:00:00Z");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn system_date_minus_u_produces_a_utc_iso8601_timestamp() {
+        // Arrange
+        // Production `make update-mac-vendors` invokes `/bin/date` (BSD on macOS, GNU on Linux)
+        // with `-u +%Y-%m-%dT%H:%M:%SZ`. Fake date scripts cannot catch a format incompatibility.
+
+        // Act
+        let timestamp = utc_timestamp_from_date()
+            .expect("updater hosts need date -u +%Y-%m-%dT%H:%M:%SZ on PATH");
+
+        // Assert
+        let bytes = timestamp.as_bytes();
+        assert_eq!(
+            bytes.len(),
+            20,
+            "expected YYYY-MM-DDTHH:MM:SSZ from date -u, got {timestamp:?}"
+        );
+        assert_eq!(bytes[4], b'-');
+        assert_eq!(bytes[7], b'-');
+        assert_eq!(bytes[10], b'T');
+        assert_eq!(bytes[13], b':');
+        assert_eq!(bytes[16], b':');
+        assert_eq!(bytes[19], b'Z');
+        assert!(
+            timestamp.bytes().all(|octet| octet.is_ascii()),
+            "timestamp must be ASCII, got {timestamp:?}"
+        );
+        for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+            assert!(
+                bytes[index].is_ascii_digit(),
+                "expected a digit at index {index} in {timestamp:?}"
+            );
+        }
     }
 
     #[test]

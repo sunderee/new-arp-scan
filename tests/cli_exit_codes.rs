@@ -159,6 +159,82 @@ fn binary_root_help_exits_successfully() {
 }
 
 #[test]
+fn binary_scan_exits_with_operational_failure_for_missing_mac_vendor_file() {
+    // Arrange
+    let binary_path = new_arp_scan_binary_path();
+    assert!(
+        binary_path.is_file(),
+        "expected binary at {}, set CARGO_BIN_EXE or run `cargo test` from the crate root",
+        binary_path.display()
+    );
+
+    // Act
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "scan",
+            "--mac-vendor-file",
+            "/no/such/new-arp-scan-ieee-oui.txt",
+        ])
+        .output()
+        .expect("spawning scan with a missing MAC vendor file should succeed");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a missing --mac-vendor-file must fail before the platform scan path, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to load MAC vendor file")
+            && stderr.contains("/no/such/new-arp-scan-ieee-oui.txt"),
+        "stderr should name the vendor-file load failure, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_scan_exits_with_operational_failure_for_invalid_mac_vendor_file() {
+    // Arrange
+    let binary_path = new_arp_scan_binary_path();
+    assert!(
+        binary_path.is_file(),
+        "expected binary at {}, set CARGO_BIN_EXE or run `cargo test` from the crate root",
+        binary_path.display()
+    );
+    let path = std::env::temp_dir().join(format!(
+        "new-arp-scan-invalid-mac-vendor-cli-{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&path, "not a mapping line\n").expect("write invalid mapping");
+
+    // Act
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "scan",
+            "--mac-vendor-file",
+            path.to_str().expect("temp mapping path should be UTF-8"),
+        ])
+        .output()
+        .expect("spawning scan with an invalid MAC vendor file should succeed");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an invalid --mac-vendor-file must fail closed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to load MAC vendor file")
+            && stderr.contains("missing a tab separator"),
+        "stderr should report the mapping parse error, got: {stderr}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn binary_exits_with_usage_error_code_when_scan_subcommand_receives_unknown_flag() {
     // Arrange
     let binary_path = new_arp_scan_binary_path();

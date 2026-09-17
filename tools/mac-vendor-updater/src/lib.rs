@@ -163,6 +163,44 @@ mod tests {
     }
 
     #[test]
+    fn from_dir_uses_system_date_when_retrieved_at_is_omitted() {
+        // Arrange
+        let dir = unique_dir();
+        write_four_csvs(&dir, "MA-L,AABBCC,Example Corp,Addr\r\n");
+        let output = dir.join("ieee-oui.txt");
+
+        // Act
+        let converted = run_update(&UpdateRequest {
+            output_path: output.clone(),
+            from_dir: Some(dir.clone()),
+            retrieved_at_utc: None,
+        })
+        .expect("offline update should invoke system date");
+
+        // Assert
+        let text = fs::read_to_string(&output).expect("read generated file");
+        assert_eq!(converted.text, text);
+        let retrieved = text
+            .lines()
+            .find(|line| line.starts_with("# Retrieved (UTC): "))
+            .expect("provenance header should include retrieval time");
+        let timestamp = retrieved
+            .strip_prefix("# Retrieved (UTC): ")
+            .expect("retrieved line has a timestamp");
+        assert_eq!(
+            timestamp.len(),
+            20,
+            "date -u must yield YYYY-MM-DDTHH:MM:SSZ, got {timestamp:?}"
+        );
+        assert!(
+            timestamp.as_bytes()[10] == b'T' && timestamp.ends_with('Z'),
+            "timestamp must be UTC ISO-8601, got {timestamp:?}"
+        );
+        assert!(text.contains("AABBCC\tExample Corp\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn from_dir_writes_validated_text_and_does_not_fetch() {
         // Arrange
         let dir = unique_dir();

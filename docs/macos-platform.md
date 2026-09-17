@@ -27,7 +27,7 @@ Opening a Berkeley Packet Filter device typically requires **root** (run with `s
 - `interfaces` needs **no privileges** — it only reads `getifaddrs(3)`.
 - `scan` opens `/dev/bpf*`. When the process lacks access, the open fails with **permission denied** and the tool reports an explicit *"requires root or BPF access (try running with sudo)"* error (`AppError::BpfDeviceAccessRequired`) that does **not** leak the device path. This is distinct from an unknown-interface error, which fails earlier during discovery.
 
-**Contributors do not need BPF access** to run the full unit test suite on macOS: tests use fixtures, `getifaddrs` enumeration (unprivileged), unknown-interface lookups, and the BPF-open **error path**. No automated test opens a BPF device for a live scan.
+**Contributors do not need BPF access** to run the full unit test suite on macOS: tests use fixtures, `getifaddrs` enumeration (unprivileged), unknown-interface lookups, and the BPF-open **error path**. IEEE updater tests use `--from-dir` CSV fixtures and never contact IEEE. No automated test opens a Berkeley Packet Filter device for a live scan.
 
 ---
 
@@ -45,10 +45,14 @@ macOS interfaces use names such as `en0` (typically the primary Ethernet/Wi-Fi),
    ```bash
    cargo fmt --all -- --check
    cargo clippy --all-targets -- -D warnings
-   cargo test
+   NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+     cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --workspace
+   NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+     cargo test --workspace --features bundled-mac-vendors
    ```
 
-   `make lint` / `make test` run equivalent commands (`make lint` rewrites formatting instead of only checking it).
+   `make lint` / `make test` run equivalent commands (`make lint` rewrites formatting instead of only checking it). IEEE registry downloads stay on `make update-mac-vendors` (system `curl` plus `date -u`; not run in CI).
 
 3. **Manual acceptance scan** (needs root / BPF access, touches your LAN):
 
@@ -57,9 +61,10 @@ macOS interfaces use names such as `en0` (typically the primary Ethernet/Wi-Fi),
    sudo ./target/debug/new-arp-scan interfaces
    sudo ./target/debug/new-arp-scan scan --interface en0
    sudo ./target/debug/new-arp-scan scan --interface en0 --host 192.168.1.50
+   sudo ./target/debug/new-arp-scan scan --interface en0 --mac-vendor-file ieee-oui.txt
    ```
 
-   Discovered hosts print as `<IPv4> <MAC>` followed by a `scan complete: …` timing line on standard error.
+   Discovered hosts print as `<IPv4> <MAC>`, or `<IPv4> <MAC> <vendor>` when a mapping file is loaded, followed by a `scan complete: …` timing line on standard error. Generate `ieee-oui.txt` first with `make update-mac-vendors`. Vendor loading happens before the BPF open, so a missing or invalid mapping file fails without needing root.
 
 ---
 
