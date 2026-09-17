@@ -2,7 +2,7 @@
 
 ARP scanning tool (Rust). On Linux, `scan` performs address resolution protocol discovery across the selected interface’s IPv4 subnet using raw `AF_PACKET` / `SOCK_RAW` sockets. On macOS it does the same over a Berkeley Packet Filter (`/dev/bpf*`) device, with identical command-line flags, output, and exit codes.
 
-Copyright © Bizjak Tech OÜ.
+Copyright © Peter Aleksander Bizjak.
 
 Licensed under the GNU Affero General Public License v3.0 only. See [LICENSE](LICENSE).
 
