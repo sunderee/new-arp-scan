@@ -8,5 +8,9 @@
 # Cargo
 /target
 
+# Generated IEEE MAC registry snapshot (operators refresh locally; not committed)
+/ieee-oui.txt
+.mac-vendor-updater-csv/
+
 # Miscellaneous
 .DS_Store

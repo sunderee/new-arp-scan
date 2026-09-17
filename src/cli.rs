@@ -16,7 +16,7 @@ EXAMPLES:
   Probe a single strictly interior host on the subnet:
     new-arp-scan scan --interface eth0 --host 192.168.1.50
 
-  Annotate MAC addresses with IEEE MA-L / MA-M / MA-S vendor names:
+    Annotate MAC addresses with IEEE MA-L / MA-M / MA-S / IAB vendor names:
     new-arp-scan scan --interface eth0 --mac-vendor-file ieee-oui.txt
 
   Send IEEE 802.1Q tagged ARP requests on VLAN 10 with PCP 5:
@@ -80,10 +80,12 @@ pub struct ScanArguments {
     /// Probe only this IPv4 address (must be strictly interior on the interface subnet).
     #[arg(long = "host", value_name = "IPv4")]
     pub host_ipv4_address: Option<Ipv4Addr>,
-    /// IEEE MA-L / MA-M / MA-S mapping file (`ieee-oui.txt` from `get-oui`, or equivalent).
+    /// IEEE MA-L / MA-M / MA-S / IAB mapping file (`ieee-oui.txt` from `mac-vendor-updater`).
     ///
     /// When set, host lines become `<IPv4> <MAC> <vendor>`. When omitted, `ieee-oui.txt` in the
-    /// current directory is used if that file exists; otherwise host lines stay `<IPv4> <MAC>`.
+    /// current directory is used if that file exists. Builds with `--features bundled-mac-vendors`
+    /// then fall back to the compile-time embedded registry. Otherwise host lines stay
+    /// `<IPv4> <MAC>`.
     #[arg(long = "mac-vendor-file", value_name = "PATH")]
     pub mac_vendor_file: Option<std::path::PathBuf>,
     /// IEEE 802.1Q VLAN identifier (`0..=4095`). When set, each request is an Ethernet II ARP

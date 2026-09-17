@@ -39,10 +39,19 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint (clippy, warnings denied)
         run: cargo clippy --all-targets -- -D warnings
+      - name: Lint bundled MAC vendor feature (clippy, warnings denied)
+        env:
+          NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
+        run: cargo clippy --all-targets --all-features -- -D warnings
       # Hermetic tests only, same as the macOS job: privileged ARP scans on the wire stay manual,
-      # so this job never opens a raw AF_PACKET socket for a live scan.
+      # so this job never opens a raw AF_PACKET socket for a live scan. IEEE registry downloads
+      # stay on `make update-mac-vendors`; tests use fixtures and `--from-dir`.
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
+      - name: Test bundled MAC vendor feature
+        env:
+          NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
+        run: cargo test --workspace --features bundled-mac-vendors
 
   macos:
     name: macOS (format, lint, test)
@@ -67,8 +76,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint (clippy, warnings denied)
         run: cargo clippy --all-targets -- -D warnings
+      - name: Lint bundled MAC vendor feature (clippy, warnings denied)
+        env:
+          NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
+        run: cargo clippy --all-targets --all-features -- -D warnings
       # Hermetic tests only: privileged ARP scans on the wire stay manual (see CONTRIBUTING.md and
       # docs/linux-platform.md), so this job never opens a Berkeley Packet Filter device for a live
-      # scan.
+      # scan. IEEE registry downloads stay on `make update-mac-vendors`.
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
+      - name: Test bundled MAC vendor feature
+        env:
+          NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
+        run: cargo test --workspace --features bundled-mac-vendors

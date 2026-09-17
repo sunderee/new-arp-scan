@@ -4,8 +4,8 @@
 //! `<hex-prefix><TAB><vendor>`. Blank lines and `#` comments are ignored. Prefixes may be any even
 //! or odd number of hexadecimal digits from 2 through 12 (one octet through a full 48-bit address).
 //! IEEE MA-L assignments are 6 digits (24 bits), MA-M assignments are 7 digits (28 bits), and MA-S
-//! (OUI-36) assignments are 9 digits (36 bits). Lookup uses longest-prefix match, so a MA-S row
-//! wins over a overlapping MA-L row.
+//! (OUI-36) and IAB assignments are 9 digits (36 bits). Lookup uses longest-prefix match, so a MA-S
+//! or IAB row wins over an overlapping MA-L row.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,7 +63,7 @@ impl std::fmt::Display for MacVendorRegistryParseError {
 impl std::error::Error for MacVendorRegistryParseError {}
 
 impl MacVendorRegistry {
-    /// Parses `arp-scan` `ieee-oui.txt` text (IEEE MA-L / MA-M / MA-S prefixes).
+    /// Parses `arp-scan` `ieee-oui.txt` text (IEEE MA-L / MA-M / MA-S / IAB prefixes).
     ///
     /// # Errors
     ///
@@ -339,5 +339,152 @@ AABBCC\tVendor
 
         // Assert
         assert_eq!(outcome, Some("Second"));
+    }
+
+    #[test]
+    fn two_digit_prefix_matches_the_first_octet_only() {
+        // Arrange
+        let registry =
+            MacVendorRegistry::parse_ieee_oui_text("F4\tShort\n").expect("2-digit prefix");
+        let matched = MacAddress::from_octets([0xF4, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let unmatched = MacAddress::from_octets([0xF5, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+        // Act
+        // Assert
+        assert_eq!(registry.vendor_name_for(matched), Some("Short"));
+        assert_eq!(registry.vendor_name_for(unmatched), None);
+    }
+
+    #[test]
+    fn twelve_digit_prefix_matches_the_full_address_only() {
+        // Arrange
+        let registry = MacVendorRegistry::parse_ieee_oui_text("001122334455\tExact\n")
+            .expect("12-digit prefix");
+        let exact = MacAddress::from_octets([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let neighboring = MacAddress::from_octets([0x00, 0x11, 0x22, 0x33, 0x44, 0x56]);
+
+        // Act
+        // Assert
+        assert_eq!(registry.vendor_name_for(exact), Some("Exact"));
+        assert_eq!(registry.vendor_name_for(neighboring), None);
+    }
+
+    #[test]
+    fn rejects_one_digit_thirteen_digit_and_separator_only_prefixes() {
+        // Arrange
+        let one_digit = MacVendorRegistry::parse_ieee_oui_text("A\tVendor\n");
+        let thirteen = MacVendorRegistry::parse_ieee_oui_text("0011223344556\tVendor\n");
+        let separators_only = MacVendorRegistry::parse_ieee_oui_text(":-\tVendor\n");
+
+        // Act
+        // Assert
+        assert!(
+            matches!(
+                one_digit,
+                Err(MacVendorRegistryParseError::InvalidPrefix {
+                    line_number: 1,
+                    ref prefix
+                }) if prefix == "A"
+            ),
+            "a single hex digit is below the 2-digit floor, got: {one_digit:?}"
+        );
+        assert!(
+            matches!(
+                thirteen,
+                Err(MacVendorRegistryParseError::InvalidPrefix { line_number: 1, .. })
+            ),
+            "13 hex digits exceed a 48-bit MAC, got: {thirteen:?}"
+        );
+        assert!(
+            matches!(
+                separators_only,
+                Err(MacVendorRegistryParseError::InvalidPrefix {
+                    line_number: 1,
+                    ref prefix
+                }) if prefix.is_empty()
+            ),
+            "stripping separators must not invent a prefix, got: {separators_only:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_vendor_as_a_missing_tab() {
+        // Arrange
+        // Whole-line trim treats a trailing tab as whitespace, so `AABBCC\t   ` becomes `AABBCC`.
+        let outcome = MacVendorRegistry::parse_ieee_oui_text("AABBCC\t   \n");
+
+        // Act
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(MacVendorRegistryParseError::LineMissingTab { line_number: 1 })
+            ),
+            "a mapping whose vendor is only whitespace must be rejected, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn load_from_path_maps_parse_errors_to_invalid_data() {
+        // Arrange
+        let path = std::env::temp_dir().join(format!(
+            "new-arp-scan-invalid-mac-vendor-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "not a mapping line\n").expect("write invalid mapping");
+
+        // Act
+        let outcome = MacVendorRegistry::load_from_path(&path);
+
+        // Assert
+        let error = outcome.expect_err("invalid mapping text must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_path_missing_file_is_not_found() {
+        // Arrange
+        let path = std::path::Path::new("/no/such/new-arp-scan-ieee-oui.txt");
+
+        // Act
+        let outcome = MacVendorRegistry::load_from_path(path);
+
+        // Assert
+        let error = outcome.expect_err("missing file must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn parse_error_display_names_line_and_prefix() {
+        // Arrange
+        let missing_tab = MacVendorRegistryParseError::LineMissingTab { line_number: 7 };
+        let invalid = MacVendorRegistryParseError::InvalidPrefix {
+            line_number: 3,
+            prefix: "GG".to_string(),
+        };
+
+        // Act
+        // Assert
+        assert!(missing_tab.to_string().contains("line 7"));
+        assert!(
+            invalid.to_string().contains("line 3") && invalid.to_string().contains("`GG`"),
+            "invalid prefix display should name the line and prefix, got: {invalid}"
+        );
+    }
+
+    #[test]
+    fn strips_dash_and_dot_separators_from_prefix_field() {
+        // Arrange
+        let dashed = MacVendorRegistry::parse_ieee_oui_text("00-11-22\tDashed\n")
+            .expect("dash-separated prefix should parse");
+        let dotted = MacVendorRegistry::parse_ieee_oui_text("00.11.22\tDotted\n")
+            .expect("dot-separated prefix should parse");
+        let address = MacAddress::from_octets([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+
+        // Act
+        // Assert
+        assert_eq!(dashed.vendor_name_for(address), Some("Dashed"));
+        assert_eq!(dotted.vendor_name_for(address), Some("Dotted"));
     }
 }

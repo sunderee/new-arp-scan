@@ -254,7 +254,7 @@ new-arp-scan scan
 # Use a custom receive window, pacing between scan rounds, and multiple attempts
 new-arp-scan scan --interface eth0 --timeout-ms 5000 --pacing-ms 10 --attempts 3
 
-# Annotate MAC addresses from an IEEE MA-L / MA-M / MA-S mapping file
+# Annotate MAC addresses from an IEEE MA-L / MA-M / MA-S / IAB mapping file
 new-arp-scan scan --interface eth0 --mac-vendor-file ieee-oui.txt
 
 # Send IEEE 802.1Q tagged ARP requests on VLAN 10
@@ -326,9 +326,14 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
             <li>
               Discovered hosts: <span class="font-mono text-zinc-800 dark:text-zinc-200">&lt;IPv4&gt; &lt;MAC&gt;</span>
               on standard output, sorted by ascending IPv4 address. MAC addresses are colon-separated lowercase hex.
-              With <span class="font-mono">--mac-vendor-file</span> or a present <span class="font-mono">ieee-oui.txt</span>,
+              With <span class="font-mono">--mac-vendor-file</span>, a present <span class="font-mono">ieee-oui.txt</span>,
+              or a binary built with <span class="font-mono">--features bundled-mac-vendors</span>,
               the line is <span class="font-mono text-zinc-800 dark:text-zinc-200">&lt;IPv4&gt; &lt;MAC&gt; &lt;vendor&gt;</span>
-              (or <span class="font-mono">(Unknown)</span> when no IEEE MA-L / MA-M / MA-S prefix matches).
+              (or <span class="font-mono">(Unknown)</span> when no IEEE MA-L / MA-M / MA-S / IAB prefix matches).
+              Search order is explicit path, then the current-directory file, then the compile-time bundle.
+              <span class="font-mono">scan</span> never downloads IEEE listings. Operators refresh with
+              <span class="font-mono">make update-mac-vendors</span> (MA-L, MA-M, MA-S, and IAB via system
+              <span class="font-mono">curl</span>; generated <span class="font-mono">ieee-oui.txt</span> is not committed).
             </li>
             <li>
               Non-fatal issues (e.g. failed send, malformed frame, conflicting duplicate address resolution reply for the same IPv4):

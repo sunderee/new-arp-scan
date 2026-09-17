@@ -17,7 +17,7 @@ Tracked for release documentation: [GitHub issue #33](https://github.com/Bizjak-
 | **Pure IPv4 logic** | `ipv4_subnet.rs`, `ipv4_cidr.rs` | Subnet math and CIDR parsing; built on every target. |
 | **Name / shape checks** | `interface_validation.rs` | Interface name rules and `ifreq` name packing helpers (shared by both backends). |
 | **Link and ARP encoding** | `mac_address.rs`, `ethernet_frame.rs`, `address_resolution_protocol.rs` | Types and on-wire framing for Ethernet II + ARP; IEEE 802.1Q send (`--vlan`, `--pcp`, `--dei`) and receive; IEEE 802.1ad service tag send (`--svlan`, `--spcp`, `--sdei`) and receive; RFC 1042 SNAP send (`--llc`) and receive; RFC 5227 Probe/Announcement (`--arpspa`); Ethernet `--destaddr`/`--srcaddr`, remaining RFC 826 `ar$*` overrides, and `--padding`. |
-| **IEEE MAC registries** | `mac_vendor_registry.rs` | Longest-prefix MA-L / MA-M / MA-S vendor lookup from `ieee-oui.txt`. |
+| **IEEE MAC registries** | `mac_vendor_registry.rs`, `tools/mac-vendor-updater/` | Longest-prefix MA-L / MA-M / MA-S / IAB lookup from `ieee-oui.txt`. The updater fetches official CSVs with system `curl`, converts them, and atomically writes the mapping file. The scan crate never downloads. |
 | **Portable link layer** | `link_layer_backend.rs`, `scanner.rs` | The `LinkLayerEndpoint` trait and shared interface/address value types; the backend-generic scan engine (target iteration, send/receive scheduling, merge duplicate replies, warnings). |
 | **Linux backend** | `linux_scanner.rs`, `linux_interface_discovery.rs`, `linux_socket.rs`, `linux_system_call.rs`, `linux_packet.rs` | `AF_PACKET` raw socket, `ioctl`/`if_nameindex` discovery, `sockaddr_ll`, and the Linux scan entry points. |
 | **macOS backend** | `macos_scanner.rs`, `macos_interface_discovery.rs`, `macos_bpf_socket.rs`, `macos_system_call.rs`, `macos_packet.rs` | Berkeley Packet Filter device (`/dev/bpf*`), `getifaddrs(3)` discovery, BPF ioctls/filter, and the macOS scan entry points. |
@@ -91,7 +91,7 @@ For field-level behavior, read module-level `//!` comments and the [operator doc
 - Arrange / Act / Assert with blank lines.
 - Test names are full **snake_case sentences**.
 - Prefer matching **specific** `Err` variants over `is_err()` alone.
-- Avoid external network dependencies; prefer fixtures and controlled syscalls.
+- Avoid external network dependencies; prefer fixtures and controlled syscalls. The IEEE updater is tested from CSV fixtures (`--from-dir`); CI never fetches IEEE listings.
 
 Privileged **full-subnet** scans are validated manually (for example with `tcpdump`); automating them in CI would require a dedicated harness or namespace setup (see [Linux platform](linux-platform.md)).
 
@@ -107,5 +107,6 @@ Privileged **full-subnet** scans are validated manually (for example with `tcpdu
 | New `AppError` variant | `error.rs`, then every `Display` / `source` path and matching tests |
 | New syscall wrapper | `linux_system_call.rs` (Linux) or `macos_system_call.rs` (macOS) |
 | New link-layer backend operation | `link_layer_backend.rs` trait, then each backend endpoint |
+| New IEEE OUI snapshot | `make update-mac-vendors` (`tools/mac-vendor-updater`); do not fetch from `scan` |
 
 When in doubt, open a small pull request and point reviewers to this file for orientation.

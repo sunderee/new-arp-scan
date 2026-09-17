@@ -45,6 +45,7 @@ Which runs:
 
 1. `cargo fmt --all`
 2. `cargo clippy --all-targets -- -D warnings`
+3. clippy again with `--all-features` (fixture path in `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE`)
 
 Fix warnings rather than adding `#[allow(...)]` unless you document why and record the exception in [DECISIONS.md](../DECISIONS.md) when required by [CONTRIBUTING.md](../CONTRIBUTING.md).
 
@@ -56,10 +57,13 @@ Fix warnings rather than adding `#[allow(...)]` unless you document why and reco
 make test
 ```
 
-Which runs **`cargo test`** then **`cargo test --tests`**. The second pass ensures integration test binaries under `tests/` are exercised explicitly.
+Which runs **`cargo test --workspace`**, **`cargo test --tests`**, then the fixture-bundled feature tests. The second pass ensures integration test binaries under `tests/` are exercised explicitly.
 
 - **Unit tests** live in `src/**/*.rs` under `#[cfg(test)]`.
 - **Integration tests** live in `tests/**/*.rs` and call the **public library API** or the **built CLI** via `CARGO_BIN_EXE_new_arp_scan` / `CARGO_BIN_EXE_new-arp-scan`.
+- **IEEE updater tests** live with `tools/mac-vendor-updater` and use CSV fixtures (`--from-dir`). They must not contact IEEE.
+
+`make test` also rebuilds with `--features bundled-mac-vendors` against `tests/fixtures/ieee-mac-registry.txt` so the explicit → cwd → packaged search order is covered. That feature stays off for default `cargo test` / `cargo build`.
 
 Some Linux tests are **environment-sensitive** (loopback classification, raw/datagram sockets in sandboxes). If a failure looks environment-related, re-run on a normal Linux host or compare with [AGENTS.md](../AGENTS.md).
 
@@ -92,7 +96,7 @@ If you work on packet paths or CI behavior, read:
 ## Checklist before opening a pull request
 
 - [ ] `make lint` passes (or equivalent `cargo fmt` + `cargo clippy`).
-- [ ] `make test` passes (or equivalent double `cargo test` invocation).
+- [ ] `make test` passes (or equivalent workspace tests plus the fixture-bundled feature run).
 - [ ] New behavior has tests and, for public API, doc examples.
 - [ ] Architectural changes recorded in **DECISIONS.md** when required by project rules.
 
