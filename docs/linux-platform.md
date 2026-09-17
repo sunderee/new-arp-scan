@@ -41,8 +41,8 @@ If the process lacks the capability, the kernel returns **permission denied**; t
    From the repository root:
 
    ```bash
-   make lint    # cargo fmt --all && cargo clippy --all-targets -- -D warnings
-   make test    # cargo test && cargo test --tests
+   make lint    # cargo fmt --all, clippy, then clippy --all-features against the IEEE fixture
+   make test    # cargo test --workspace, cargo test --tests, then fixture-bundled feature tests
    ```
 
    Or invoke the same `cargo` commands manually.

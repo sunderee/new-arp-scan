@@ -64,10 +64,14 @@ The crate supports **Linux** (`AF_PACKET` raw sockets) and **macOS** (Berkeley P
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+  cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace
+NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+  cargo test --workspace --features bundled-mac-vendors
 ```
 
-These are the same checks as `make lint` / `make test`, except CI uses `cargo fmt --all -- --check` (verify only, never rewrite).
+These are the same checks as `make lint` / `make test`, except CI uses `cargo fmt --all -- --check` (verify only, never rewrite). CI never fetches IEEE MAC listings; regenerate `ieee-oui.txt` locally with `make update-mac-vendors`.
 
 If you only have one platform to hand, you can still type-check and lint the other target's modules without running its tests:
 
@@ -87,9 +91,10 @@ cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
   sudo ./target/debug/new-arp-scan interfaces
   sudo ./target/debug/new-arp-scan scan --interface en0
   sudo ./target/debug/new-arp-scan scan --interface en0 --host 192.168.1.50
+  sudo ./target/debug/new-arp-scan scan --interface en0 --mac-vendor-file ieee-oui.txt
   ```
 
-  `interfaces` needs no privileges; `scan` opens `/dev/bpf*` and fails with a "run with sudo" error otherwise. Verify frames with `tcpdump -ni en0 arp` in another terminal.
+  `interfaces` needs no privileges; `scan` opens `/dev/bpf*` and fails with a "run with sudo" error otherwise. Verify frames with `tcpdump -ni en0 arp` in another terminal. Vendor annotation needs a mapping file (`make update-mac-vendors` writes `ieee-oui.txt`); a missing or invalid file fails before BPF is opened.
 
 - **Linux** (needs `CAP_NET_RAW`, typically via `sudo`): use the same commands with the appropriate interface (for example `eth0`). See [docs/linux-platform.md](docs/linux-platform.md).
 
@@ -106,6 +111,12 @@ make fuzz                         # 60 s by default; FUZZ_SECONDS=300 make fuzz 
 Run it after changing anything in `src/ethernet_frame.rs` or `src/address_resolution_protocol.rs`. See [fuzz/README.md](fuzz/README.md) for the corpus layout and how to reproduce a finding.
 
 When you change the developer workflow commands, update the `Makefile`, this file, and the CI workflow together so they stay aligned.
+
+## IEEE MAC registry updater
+
+`tools/mac-vendor-updater` is an internal workspace binary. It depends on `csv` so the privileged `new-arp-scan` crate does not. Tests must stay hermetic: use `--from-dir` and the CSVs under `tools/mac-vendor-updater/tests/fixtures/`. Do not add live HTTP to `cargo test` or CI.
+
+Default builds do not embed IEEE data. Release builders who want a bundled snapshot run `make update-mac-vendors` and then `cargo build --release --features bundled-mac-vendors`. Do not commit generated `ieee-oui.txt`.
 
 ## Licensing
 

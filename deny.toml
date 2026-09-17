@@ -1,0 +1,27 @@
+# cargo-deny policy for new-arp-scan.
+#
+# First-party crates are AGPL-3.0-only. Transitive crates must match this allow-list.
+
+[graph]
+all-features = false
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "AGPL-3.0-only",
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,8 +1,9 @@
-# ieee-mac-registry.txt -- fixture IEEE MA-L / MA-M / MA-S mappings
+# ieee-mac-registry.txt -- fixture IEEE MA-L / MA-M / MA-S / IAB mappings
 #
-# Prefix lengths: MA-L = 6 hex digits (24 bits), MA-M = 7 (28 bits), MA-S = 9 (36 bits).
+# Prefix lengths: MA-L = 6 hex digits (24 bits), MA-M = 7 (28 bits), MA-S / IAB = 9 (36 bits).
 
 F4A475	Fixture MA-L
 F4A4750	Fixture MA-M
 F4A475000	Fixture MA-S
 001A2B	Fixture other MA-L
+40D8550D7	Fixture IAB

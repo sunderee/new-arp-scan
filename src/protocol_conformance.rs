@@ -259,6 +259,7 @@ fn ieee_ma_l_ma_m_ma_s_longest_prefix_match_follows_registry_bit_lengths() {
     let twenty_eight_bit = MacAddress::from_octets([0xF4, 0xA4, 0x75, 0x0A, 0x11, 0x22]);
     let thirty_six_bit = MacAddress::from_octets([0xF4, 0xA4, 0x75, 0x00, 0x01, 0x22]);
     let other_assignment = MacAddress::from_octets([0x00, 0x1A, 0x2B, 0x00, 0x00, 0x01]);
+    let iab_assignment = MacAddress::from_octets([0x40, 0xD8, 0x55, 0x0D, 0x70, 0x01]);
 
     // Act
     // Assert
@@ -277,6 +278,10 @@ fn ieee_ma_l_ma_m_ma_s_longest_prefix_match_follows_registry_bit_lengths() {
     assert_eq!(
         registry.vendor_name_for(other_assignment),
         Some("Fixture other MA-L")
+    );
+    assert_eq!(
+        registry.vendor_name_for(iab_assignment),
+        Some("Fixture IAB")
     );
 }
 

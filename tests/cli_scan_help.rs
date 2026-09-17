@@ -53,6 +53,7 @@ fn binary_scan_help_exits_successfully_and_mentions_interface_flag() {
             && stdout.contains("--attempts")
             && stdout.contains("--host")
             && stdout.contains("--mac-vendor-file")
+            && stdout.contains("IAB")
             && stdout.contains("--vlan")
             && stdout.contains("--pcp")
             && stdout.contains("--dei")

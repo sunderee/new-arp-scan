@@ -286,7 +286,7 @@ impl ApplicationOutcome {
         self.write_operator_streams_with_mac_vendor_registry(standard_output, standard_error, None)
     }
 
-    /// Writes operator output, annotating host lines with IEEE MA-L / MA-M / MA-S vendor names
+    /// Writes operator output, annotating host lines with IEEE MA-L / MA-M / MA-S / IAB vendor names
     /// when `mac_vendor_registry` is [`Some`].
     ///
     /// With a registry, each host line is `<IPv4> <MAC> <vendor>` (or `(Unknown)` when no prefix
@@ -829,6 +829,72 @@ mod tests {
             stdout,
             "10.0.0.1 00:11:22:33:44:55 Example Corp\n10.0.0.2 ff:ee:dd:cc:bb:aa (Unknown)\n"
         );
+    }
+
+    #[test]
+    fn write_operator_streams_with_registry_annotates_iab_prefixes() {
+        // Arrange
+        use crate::mac_vendor_registry::MacVendorRegistry;
+
+        let host = DiscoveredHost {
+            ipv4_address: Ipv4Addr::new(10, 0, 0, 3),
+            media_access_control_address: MacAddress::from_octets([
+                0x40, 0xD8, 0x55, 0x0D, 0x70, 0x01,
+            ]),
+        };
+        let registry = MacVendorRegistry::parse_ieee_oui_text("40D8550D7\tFixture IAB\n")
+            .expect("IAB fixture should parse");
+        let outcome = ApplicationOutcome::Scan(ScanOutcome {
+            discovered_hosts: vec![host],
+            warnings: vec![],
+            timing_summary: None,
+        });
+        let mut standard_output = Vec::new();
+        let mut standard_error = Vec::new();
+
+        // Act
+        outcome
+            .write_operator_streams_with_mac_vendor_registry(
+                &mut standard_output,
+                &mut standard_error,
+                Some(&registry),
+            )
+            .expect("in-memory writes should succeed");
+
+        // Assert
+        assert_eq!(standard_output, b"10.0.0.3 40:d8:55:0d:70:01 Fixture IAB\n");
+        assert!(
+            standard_error.is_empty(),
+            "vendor annotation must not leak onto standard error"
+        );
+    }
+
+    #[test]
+    fn empty_scan_with_registry_still_prints_no_hosts_found() {
+        // Arrange
+        use crate::mac_vendor_registry::MacVendorRegistry;
+
+        let registry = MacVendorRegistry::parse_ieee_oui_text("001122\tExample Corp\n")
+            .expect("fixture registry should parse");
+        let outcome = ApplicationOutcome::Scan(ScanOutcome {
+            discovered_hosts: vec![],
+            warnings: vec![],
+            timing_summary: None,
+        });
+        let mut standard_output = Vec::new();
+        let mut standard_error = Vec::new();
+
+        // Act
+        outcome
+            .write_operator_streams_with_mac_vendor_registry(
+                &mut standard_output,
+                &mut standard_error,
+                Some(&registry),
+            )
+            .expect("in-memory writes should succeed");
+
+        // Assert
+        assert_eq!(standard_output, b"no hosts found\n");
     }
 
     #[test]

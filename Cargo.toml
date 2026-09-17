@@ -5,6 +5,21 @@ edition = "2024"
 rust-version = "1.98"
 license = "AGPL-3.0-only"
 
+[workspace]
+resolver = "3"
+members = ["tools/mac-vendor-updater"]
+
+[workspace.dependencies]
+# Used only by tools/mac-vendor-updater so IEEE CSV parsing never enters the privileged scan crate.
+csv = { version = "1.4", default-features = false }
+
+[features]
+default = []
+# Embed a generated `ieee-oui.txt` (or a substitute path) in the `new-arp-scan` binary.
+# Default and CI builds leave this off. Release builders should run `make update-mac-vendors`
+# first, or set `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE` to the mapping file to compile in.
+bundled-mac-vendors = []
+
 [dependencies]
 clap = { version = "4.6", features = ["derive", "std"] }
 libc = "0.2"
