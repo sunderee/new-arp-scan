@@ -92,11 +92,12 @@ cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
   sudo ./target/debug/new-arp-scan scan --interface en0
   sudo ./target/debug/new-arp-scan scan --interface en0 --host 192.168.1.50
   sudo ./target/debug/new-arp-scan scan --interface en0 --mac-vendor-file ieee-oui.txt
+  sudo ./target/debug/new-arp-scan monitor --interface en0
   ```
 
-  `interfaces` needs no privileges; `scan` opens `/dev/bpf*` and fails with a "run with sudo" error otherwise. Verify frames with `tcpdump -ni en0 arp` in another terminal. Vendor annotation needs a mapping file (`make update-mac-vendors` writes `ieee-oui.txt`); a missing or invalid file fails before BPF is opened.
+  `interfaces` needs no privileges; `scan` and `monitor` open `/dev/bpf*` and fail with a "run with sudo" error otherwise. Verify scan frames with `tcpdump -ni en0 arp` in another terminal. `monitor` must not transmit; `tcpdump` should stay quiet for frames from that process. Vendor annotation needs a mapping file (`make update-mac-vendors` writes `ieee-oui.txt`); a missing or invalid file fails before BPF is opened. `monitor` does not load a vendor file.
 
-- **Linux** (needs `CAP_NET_RAW`, typically via `sudo`): use the same commands with the appropriate interface (for example `eth0`). See [docs/linux-platform.md](docs/linux-platform.md).
+- **Linux** (needs `CAP_NET_RAW`, typically via `sudo`): use the same commands with the appropriate interface (for example `eth0`, and `sudo ./target/debug/new-arp-scan monitor --interface eth0`). See [docs/linux-platform.md](docs/linux-platform.md). CI never runs these privileged scans or listens.
 
 ## Fuzzing
 

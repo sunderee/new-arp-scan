@@ -26,8 +26,7 @@ pub(crate) const MONITOR_DISTINCT_RECORD_LIMIT: usize = 4_096;
 /// Receive buffer shared with the scanner's fixed capture buffer.
 const RECEIVE_BUFFER_LENGTH: usize = 4_096;
 
-const PASSIVE_MONITOR_TRUNCATION_WARNING: &str =
-    "passive monitor record limit reached; additional distinct ARP packets were not recorded";
+const PASSIVE_MONITOR_TRUNCATION_WARNING: &str = "passive monitor record limit reached; additional distinct ARP packets were not recorded, and duplicate-ip claims were not updated for those packets";
 
 /// Local addresses and hardware address used to classify inbound ARP.
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +40,10 @@ pub(crate) struct MonitorListenRequest<'a> {
 }
 
 /// Whether a retained ARP packet conflicts with a local address or is only observed.
+///
+/// New classes may be added. Match with a wildcard outside this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PassiveArpClass {
     /// RFC 5227-style conflict: request or reply, local `ar$spa`, foreign `ar$sha`.
     Conflict,
@@ -50,7 +52,10 @@ pub enum PassiveArpClass {
 }
 
 /// One aggregated ARP packet identity.
+///
+/// New fields may be added.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PassiveArpRecord {
     /// Conflict or ordinary observation. A packet is never both.
     pub classification: PassiveArpClass,
@@ -69,7 +74,11 @@ pub struct PassiveArpRecord {
 }
 
 /// Nonlocal, non-zero IPv4 address claimed by more than one hardware address.
+///
+/// New fields may be added. A packet dropped by the distinct-record limit does not create or
+/// extend one of these claims.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DuplicateIpClaim {
     /// Shared `ar$spa`.
     pub protocol_address: Ipv4Addr,
@@ -78,7 +87,10 @@ pub struct DuplicateIpClaim {
 }
 
 /// Buffered result of one passive listen.
+///
+/// New fields may be added. Duplicate claims cover only packet identities that were retained.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MonitorListenOutcome {
     /// Conflict and observation records in first-seen order.
     pub records: Vec<PassiveArpRecord>,

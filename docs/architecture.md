@@ -11,18 +11,18 @@ Tracked for release documentation: [GitHub issue #33](https://github.com/Bizjak-
 | Area | Modules | Role |
 |------|---------|------|
 | **Entry** | `main.rs` | Parse arguments with `clap`, optional IEEE vendor file load, call `run()`, write [`ApplicationOutcome`](../src/application_outcome.rs) via [`write_operator_streams`](../src/application_outcome.rs) / [`write_operator_streams_with_mac_vendor_registry`](../src/application_outcome.rs), exit codes, print `AppError` on failure. |
-| **Application surface** | `lib.rs`, `application_command.rs`, `application_outcome.rs` | Public `run(ApplicationCommand)` contract, outcomes, operator output layout, timing summary attachment after successful Linux scans. |
+| **Application surface** | `lib.rs`, `application_command.rs`, `application_outcome.rs` | Public `run(ApplicationCommand)` contract, outcomes, operator output layout, timing summary attachment after successful scans, and the passive monitor outcome. `ApplicationCommand` and `ApplicationOutcome` are `#[non_exhaustive]` as of 0.4.0. |
 | **Operator parsing** | `cli.rs` | Command-line types and validation (delegated from `main.rs`). |
 | **Errors** | `error.rs` | Single [`AppError`](../src/error.rs) enum; `Display` / `Error` for operators and tests. |
 | **Pure IPv4 logic** | `ipv4_subnet.rs`, `ipv4_cidr.rs` | Subnet math and CIDR parsing; built on every target. |
 | **Name / shape checks** | `interface_validation.rs` | Interface name rules and `ifreq` name packing helpers (shared by both backends). |
 | **Link and ARP encoding** | `mac_address.rs`, `ethernet_frame.rs`, `address_resolution_protocol.rs` | Types and on-wire framing for Ethernet II + ARP; IEEE 802.1Q send (`--vlan`, `--pcp`, `--dei`) and receive; IEEE 802.1ad service tag send (`--svlan`, `--spcp`, `--sdei`) and receive; RFC 1042 SNAP send (`--llc`) and receive; RFC 5227 Probe/Announcement (`--arpspa`); Ethernet `--destaddr`/`--srcaddr`, remaining RFC 826 `ar$*` overrides, and `--padding`. |
 | **IEEE MAC registries** | `mac_vendor_registry.rs`, `tools/mac-vendor-updater/` | Longest-prefix MA-L / MA-M / MA-S / IAB lookup from `ieee-oui.txt`. The updater fetches official CSVs with system `curl`, converts them, and atomically writes the mapping file. The scan crate never downloads. |
-| **Portable link layer** | `link_layer_backend.rs`, `scanner.rs`, `scan_timing.rs` | The `LinkLayerEndpoint` trait and shared interface/address value types; the backend-generic scan engine (target iteration, burst or strict inter-target scheduling, per-round receive on the rate-limited path, merge duplicate replies, warnings); checked bandwidth and backoff arithmetic with an injectable monotonic clock. |
-| **Linux backend** | `linux_scanner.rs`, `linux_interface_discovery.rs`, `linux_socket.rs`, `linux_system_call.rs`, `linux_packet.rs` | `AF_PACKET` raw socket, `ioctl`/`if_nameindex` discovery, `sockaddr_ll`, and the Linux scan entry points. |
-| **macOS backend** | `macos_scanner.rs`, `macos_interface_discovery.rs`, `macos_bpf_socket.rs`, `macos_system_call.rs`, `macos_packet.rs` | Berkeley Packet Filter device (`/dev/bpf*`), `getifaddrs(3)` discovery, BPF ioctls/filter, and the macOS scan entry points. |
+| **Portable link layer** | `link_layer_backend.rs`, `scanner.rs`, `monitor.rs`, `scan_timing.rs` | The `LinkLayerEndpoint` trait and shared interface/address value types; the backend-generic scan engine (target iteration, burst or strict inter-target scheduling, per-round receive on the rate-limited path, merge duplicate replies, warnings); the receive-only monitor engine (conflict, observation, and duplicate classification, bounded aggregation, checked deadline); checked bandwidth and backoff arithmetic with an injectable monotonic clock. |
+| **Linux backend** | `linux_scanner.rs`, `linux_monitor.rs`, `linux_interface_discovery.rs`, `linux_socket.rs`, `linux_system_call.rs`, `linux_packet.rs` | `AF_PACKET` raw socket, `ioctl`/`if_nameindex` discovery, `getifaddrs(3)` for every IPv4 address on a monitor interface, `sockaddr_ll`, and the Linux scan and monitor entry points. |
+| **macOS backend** | `macos_scanner.rs`, `macos_monitor.rs`, `macos_interface_discovery.rs`, `macos_bpf_socket.rs`, `macos_system_call.rs`, `macos_packet.rs` | Berkeley Packet Filter device (`/dev/bpf*`), `getifaddrs(3)` discovery, BPF ioctls/filter, and the macOS scan and monitor entry points. |
 
-The pure logic, ARP/Ethernet encoders, portable boundary, and scan engine compile on **every** target. The Linux and macOS backend modules live behind `#[cfg(target_os = "linux")]` / `#[cfg(target_os = "macos")]` in [`lib.rs`](../src/lib.rs). On operating systems without a backend, `run()` returns [`AppError::UnsupportedPlatform`](../src/error.rs) for scan and list commands.
+The pure logic, ARP/Ethernet encoders, portable boundary, scan engine, and monitor engine compile on **every** target. The Linux and macOS backend modules live behind `#[cfg(target_os = "linux")]` / `#[cfg(target_os = "macos")]` in [`lib.rs`](../src/lib.rs). On operating systems without a backend, `run()` returns [`AppError::UnsupportedPlatform`](../src/error.rs) for scan, monitor, and list commands. A zero monitor timeout is [`AppError::MonitorTimeoutRejected`](../src/error.rs) before that platform check.
 
 ---
 
@@ -32,13 +32,13 @@ There is **no gratuitous `unsafe`**. It appears only where the language cannot e
 
 Typical clusters:
 
-- **`linux_system_call.rs`** — `libc` sockets, `ioctl`, `poll`, `if_nameindex` / `if_freenameindex`, send/receive on file descriptors. Each block should carry a **`// SAFETY:`** comment per project rules.
+- **`linux_system_call.rs`** — `libc` sockets, `ioctl`, `poll`, `if_nameindex` / `if_freenameindex`, `getifaddrs` / `freeifaddrs`, send/receive on file descriptors. Each block should carry a **`// SAFETY:`** comment per project rules.
 - **`linux_interface_discovery.rs`**, **`linux_socket.rs`**, **`interface_validation.rs`** — `ifreq` and `sockaddr` manipulation, reading kernel-populated fields.
 - **`linux_packet.rs`** — casting a known layout to `sockaddr_ll` for interpretation.
 - **`macos_system_call.rs`** — all macOS `libc` calls (`getifaddrs`, `if_nametoindex`, BPF `ioctl`s, `read`/`write`/`poll`/`fcntl`) plus `sockaddr` / `sockaddr_dl` field reads. macOS `unsafe` is centralized here.
 - **`macos_bpf_socket.rs`** — zeroed `ifreq` for `BIOCSETIF`; the BPF record de-aggregation itself is **safe** byte-slice arithmetic.
 
-The portable `scanner.rs` and the pure encoders contain **no** `unsafe`.
+The portable `scanner.rs`, `monitor.rs`, and the pure encoders contain **no** `unsafe`. The monitor loop never sends.
 
 **Rule of thumb:** treat new `unsafe` as a **last resort**, document invariants beside the block, and add a **DECISIONS.md** entry if the change is non-obvious.
 
@@ -80,6 +80,41 @@ CLI / library caller
 
 For field-level behavior, read module-level `//!` comments and the [operator docs](docs.html).
 
+## Packet flow (monitor, simplified)
+
+```text
+CLI / library caller
+       │
+       ▼
+  run() ──► reject a zero or unrepresentable timeout
+       │
+       ▼
+  resolve interface + discover every configured IPv4 address and the interface MAC
+       │
+       ▼
+  open a LinkLayerEndpoint and do not send:
+     Linux  → AF_PACKET SOCK_RAW bound to ETH_P_ALL (outermost VLAN tag still stripped by the kernel)
+     macOS  → existing /dev/bpf* opener; BIOCSSEESENT stays off
+       │
+       ▼
+  monitor.rs:
+       re-check the monotonic deadline before every read
+       parse with the scan codecs
+       suppress local SHA+SPA
+       label request/reply local-SPA foreign-SHA as conflict
+       label other well-formed ARP as observed
+       label a nonzero nonlocal SPA claimed by two or more SHAs as duplicate-ip
+       cap distinct packet records at 4,096
+       │
+       ▼
+  MonitorOutcome
+       │
+       ▼
+  write_operator_streams() → stdout lines, stderr warnings and completion summary
+```
+
+`monitor` does not call the scan engine and does not load the IEEE vendor registry.
+
 ---
 
 ## Testing strategy
@@ -107,6 +142,7 @@ Privileged **full-subnet** scans are validated manually (for example with `tcpdu
 |------|----------------|
 | New CLI flag | `cli.rs`, `application_command.rs`, `main.rs` dispatch only |
 | New scan semantics (both platforms) | `scanner.rs`, possibly `ipv4_subnet.rs` |
+| Passive monitor classification | `monitor.rs`; platform openers stay in `linux_monitor.rs` / `macos_monitor.rs` |
 | New operator output | `application_outcome.rs` (`write_operator_streams`, formatting) |
 | New `AppError` variant | `error.rs`, then every `Display` / `source` path and matching tests |
 | New syscall wrapper | `linux_system_call.rs` (Linux) or `macos_system_call.rs` (macOS) |

@@ -20,8 +20,8 @@
 - Newer stable Rust toolchains paired with recent `libc` releases can change whether fields such as `ifreq.ifr_name` and `sockaddr.sa_data` expose `c_char` or `u8` elements; portable code should coerce through `as _` (or equivalent) instead of assuming signed octets indefinitely.
 - Non-interactive `cargo llvm-cov` runs should install `llvm-tools-preview` first (`rustup component add llvm-tools-preview`) so coverage does not block on an interactive toolchain install prompt.
 - Beyond the two known environment-sensitive tests, Linux tests that open `AF_INET` datagram or raw sockets can fail with permission denied in locked-down sandboxes; rerun outside those restrictions when validating the full suite.
-- CLI scan targets derive from the selected interface's IPv4 address and netmask, with optional `--host` for a single address; there is no `--cidr` flag (`Ipv4Cidr` is library-only).
-- Process exit codes are minimal: `0` success, `1` for `AppError`/operational failure, `2` for clap usage errors; after a successful `scan`, the binary prints host lines (or `no hosts found`) on standard output, then one `scan complete: interface …` timing summary line on standard error.
+- CLI scan targets derive from the selected interface's IPv4 address and netmask, with optional `--host` for a single address; there is no `--cidr` flag (`Ipv4Cidr` is library-only). `monitor` has no `--host` and no scan flags; it listens on every IPv4 address configured on the selected interface.
+- Process exit codes are minimal: `0` success, `1` for `AppError`/operational failure, `2` for clap usage errors; after a successful `scan`, the binary prints host lines (or `no hosts found`) on standard output, then one `scan complete: interface …` timing summary line on standard error. After a successful `monitor`, it prints `conflict`, `observed`, and `duplicate-ip` lines (or `no conflicts observed`) on standard output, then warnings and one `monitor complete: interface …` summary line on standard error. `monitor --timeout-ms 0` is exit 2. A live privileged monitor stays manual and is not part of CI.
 
 ## Cursor Cloud specific instructions
 

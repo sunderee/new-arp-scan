@@ -19,6 +19,8 @@ This path bypasses the normal UDP/TCP stack for the probe traffic itself. The cr
 
 `--bandwidth`, `--interval-ms`, and `--backoff` do not change this socket. They schedule sends in the shared scanner: the default path still bursts within a round, and the opt-in path waits on the calling thread between targets. `--pacing-ms` remains extra delay between rounds only.
 
+`monitor` opens the same kind of packet socket but always binds **`ETH_P_ALL`**, then filters in userspace. That lets the existing Ethernet II, single-customer-tag, service-plus-customer-tag, and RFC 1042 SNAP parsers see frames. The kernel still strips the outermost VLAN tag, and `monitor` does not request `PACKET_AUXDATA`, so an outer TCI is not recovered. The listen loop never transmits. It discovers every IPv4 address on the selected interface name with `getifaddrs(3)` in addition to the ioctl primary address used by `scan`. Alias names such as `eth0:1` are not folded into the parent name.
+
 ---
 
 ## Privilege and capability requirements
@@ -28,7 +30,7 @@ Opening `SOCK_RAW` for packet capture/injection typically requires:
 - **`CAP_NET_RAW`**, commonly held by **root**, or
 - An equivalent **file capability** or **security policy** on the binary or wrapper.
 
-If the process lacks the capability, the kernel returns **permission denied**; the tool surfaces that with an explicit **`CAP_NET_RAW`** hint in the error text so operators know what to fix.
+If the process lacks the capability, the kernel returns **permission denied**; the tool surfaces that with an explicit **`CAP_NET_RAW`** hint in the error text so operators know what to fix. `monitor` needs the same capability. A successful listen, including one that prints `no conflicts observed`, is not proof that no other station is using the address: ARP can be spoofed, and the command does not implement RFC 5227 address conflict detection.
 
 **Contributors do not need raw privileges** to run the full unit test suite on Linux: many tests use fixtures, `ioctl` on safe sockets, or logic that fails before opening the raw ARP socket (for example **loopback rejection**). Tests that open raw packet sockets may still fail in **locked-down sandboxes**; run them on a normal developer machine or CI image that allows those syscalls.
 

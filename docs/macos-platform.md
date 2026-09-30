@@ -18,6 +18,8 @@ macOS has no `AF_PACKET`. To send and receive raw **Ethernet II frames** carryin
 
 Interface enumeration uses **`getifaddrs(3)`** (rather than Linux `ioctl`), aggregating the `AF_INET` address/netmask and the `AF_LINK` Ethernet address per interface. The pure ARP/Ethernet framing and the scan scheduling are shared with Linux through the portable link-layer backend (see [architecture](./architecture.md) and `DECISIONS.md`, 2026-06-03). `--bandwidth`, `--interval-ms`, and `--backoff` use that shared scheduler and do not change the BPF device; `--pacing-ms` remains extra delay between rounds only.
 
+`monitor` reuses that BPF opener unchanged. `BIOCSSEESENT` stays disabled, and the listen loop never writes a frame. Scan still classifies an interface from its first IPv4 address and netmask. Monitor keeps every `AF_INET` address on the selected name as a local address. A reported conflict is diagnostic only: the command does not announce, defend, or abandon an address, and a forged ARP frame can produce a false report.
+
 ---
 
 ## Privilege requirements
@@ -62,9 +64,10 @@ macOS interfaces use names such as `en0` (typically the primary Ethernet/Wi-Fi),
    sudo ./target/debug/new-arp-scan scan --interface en0
    sudo ./target/debug/new-arp-scan scan --interface en0 --host 192.168.1.50
    sudo ./target/debug/new-arp-scan scan --interface en0 --mac-vendor-file ieee-oui.txt
+   sudo ./target/debug/new-arp-scan monitor --interface en0
    ```
 
-   Discovered hosts print as `<IPv4> <MAC>`, or `<IPv4> <MAC> <vendor>` when a mapping file is loaded, followed by a `scan complete: …` timing line on standard error. Generate `ieee-oui.txt` first with `make update-mac-vendors`. Vendor loading happens before the BPF open, so a missing or invalid mapping file fails without needing root.
+   Discovered hosts print as `<IPv4> <MAC>`, or `<IPv4> <MAC> <vendor>` when a mapping file is loaded, followed by a `scan complete: …` timing line on standard error. Generate `ieee-oui.txt` first with `make update-mac-vendors`. Vendor loading happens before the BPF open, so a missing or invalid mapping file fails without needing root. `monitor` does not load that file. A listen prints `conflict`, `observed`, and `duplicate-ip` lines, or `no conflicts observed`, then one `monitor complete: …` line on standard error. `tcpdump` should show no frames sent by the monitor process.
 
 ---
 

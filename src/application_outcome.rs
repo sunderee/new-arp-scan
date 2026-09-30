@@ -242,7 +242,10 @@ impl UsableInterfacesListOutcome {
 }
 
 /// Buffered result of one passive ARP listen.
+///
+/// New fields may be added.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MonitorOutcome {
     /// Aggregated packets, duplicate claims, and warnings from the listen window.
     pub report: MonitorListenOutcome,

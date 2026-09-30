@@ -186,10 +186,12 @@
           <pre
             class="mt-4 overflow-x-auto rounded border border-zinc-200 bg-white p-4 font-mono text-sm leading-relaxed text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
           ><code>new-arp-scan interfaces
+new-arp-scan monitor [--interface &lt;NAME&gt;] [--timeout-ms &lt;MILLISECONDS&gt;]
 new-arp-scan scan [--interface &lt;NAME&gt;] [--host &lt;IPv4&gt;] [--timeout-ms &lt;MILLISECONDS&gt;] [--pacing-ms &lt;MILLISECONDS&gt;] [--attempts &lt;COUNT&gt;] [--bandwidth &lt;BITS_PER_SECOND&gt;] [--interval-ms &lt;MILLISECONDS&gt;] [--backoff &lt;FACTOR&gt;] [--mac-vendor-file &lt;PATH&gt;] [--vlan &lt;VID&gt;] [--pcp &lt;PRIORITY&gt;] [--dei] [--svlan &lt;VID&gt;] [--spcp &lt;PRIORITY&gt;] [--sdei] [--padding &lt;HEX&gt;] [--arpspa &lt;IPv4|dest&gt;] [--llc] [--destaddr &lt;MAC&gt;] [--srcaddr &lt;MAC&gt;] [--arpsha &lt;MAC&gt;] [--arptha &lt;MAC&gt;] [--arphrd &lt;UINT&gt;] [--arppro &lt;UINT&gt;] [--arphln &lt;UINT&gt;] [--arppln &lt;UINT&gt;] [--arpop &lt;UINT&gt;]</code></pre>
           <p class="mt-3 text-sm text-zinc-500 dark:text-zinc-500">
             Built-in help: <span class="font-mono">new-arp-scan --help</span>,
             <span class="font-mono">new-arp-scan interfaces --help</span>,
+            <span class="font-mono">new-arp-scan monitor --help</span>,
             <span class="font-mono">new-arp-scan scan --help</span>.
             Running <span class="font-mono">new-arp-scan</span> with no arguments prints the root help and exits
             successfully.
@@ -204,6 +206,22 @@ new-arp-scan scan [--interface &lt;NAME&gt;] [--host &lt;IPv4&gt;] [--timeout-ms
             <span class="font-mono">NETMASK</span>, and <span class="font-mono">MAC</span> columns. If none qualify, the tool prints
             <span class="font-mono text-zinc-800 dark:text-zinc-200">no usable interfaces found</span> and exits
             successfully.
+          </p>
+
+          <h3 class="mt-8 font-mono text-sm font-semibold uppercase tracking-wide text-zinc-500">monitor</h3>
+          <p class="mt-2 leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Listen-only diagnostic on Linux and macOS. It uses the same interface selection and privileges as
+            <span class="font-mono">scan</span> and transmits no frames. <span class="font-mono">--timeout-ms</span> defaults to
+            <span class="font-mono">30000</span> and must be at least <span class="font-mono">1</span>. The listen matches ARP
+            against every IPv4 address configured on the selected interface. A request or reply is a local conflict when
+            its sender protocol address is local and its sender hardware address is not the interface MAC. Frames that
+            match both the local MAC and a local IPv4 address are suppressed. Other well-formed ARP is an observation.
+            A nonzero, nonlocal sender protocol address claimed by two or more hardware addresses is labeled
+            <span class="font-mono">duplicate-ip</span>, separately from a local conflict. This is not RFC 5227 address
+            conflict detection: there are no announcements, defense, or address changes. ARP is unauthenticated, so a
+            reported conflict can be spoofed. Scan-only flags, vendor lookup, timestamps, and JSON are not part of this
+            command. On Linux the socket uses <span class="font-mono">ETH_P_ALL</span>; the kernel still strips the
+            outermost VLAN tag, and the command does not request <span class="font-mono">PACKET_AUXDATA</span>.
           </p>
 
           <h3 class="mt-8 font-mono text-sm font-semibold uppercase tracking-wide text-zinc-500">scan</h3>
@@ -375,6 +393,15 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
               No responses: prints <span class="font-mono text-zinc-800 dark:text-zinc-200">no hosts found</span> on
               standard output, still prints the timing summary on standard error, and exits successfully.
             </li>
+            <li>
+              A monitor prints <span class="font-mono">conflict</span>, <span class="font-mono">observed</span>, and
+              <span class="font-mono">duplicate-ip</span> lines on standard output. Each packet line includes the opcode,
+              sender and target hardware and protocol addresses, and a repeat count. With no local conflict it prints
+              <span class="font-mono text-zinc-800 dark:text-zinc-200">no conflicts observed</span>. Warnings and one
+              <span class="font-mono text-zinc-800 dark:text-zinc-200">monitor complete: interface &lt;NAME&gt;, &lt;N&gt; conflict(s), &lt;N&gt; observation(s), &lt;N&gt; duplicate-ip claim(s), &lt;MS&gt; ms</span>
+              line go to standard error. At most 4,096 distinct packet records are kept. Packets past that
+              limit do not create or extend <span class="font-mono">duplicate-ip</span> claims.
+            </li>
           </ul>
         </section>
 
@@ -383,7 +410,8 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
           <ul class="mt-3 list-inside list-disc space-y-2 text-zinc-600 dark:text-zinc-400">
             <li>
               <span class="font-mono text-zinc-800 dark:text-zinc-200">0</span> — successful command, including
-              <span class="font-mono">no hosts found</span>, <span class="font-mono">no usable interfaces found</span>,
+              <span class="font-mono">no hosts found</span>, <span class="font-mono">no conflicts observed</span>,
+              <span class="font-mono">no usable interfaces found</span>,
               printing help with no arguments, and successful <span class="font-mono">--help</span> invocations.
             </li>
             <li>
@@ -403,7 +431,8 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
           <h2 class="font-mono text-lg font-semibold">Library API</h2>
           <p class="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
             The crate exposes the same application surface used by the binary. Call
-            <span class="font-mono">run(ApplicationCommand::Scan { ... })</span> or
+            <span class="font-mono">run(ApplicationCommand::Scan { ... })</span>,
+            <span class="font-mono">run(ApplicationCommand::Monitor { ... })</span>, or
             <span class="font-mono">run(ApplicationCommand::UsableInterfacesList)</span> and handle
             <span class="font-mono">ApplicationOutcome</span> or <span class="font-mono">AppError</span>. On Linux and macOS, set
             <span class="font-mono">target_ipv4_address</span> on <span class="font-mono">ApplicationCommand::Scan</span> for single-host probing;
@@ -418,6 +447,12 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
               <span class="font-mono">DEFAULT_SCAN_ATTEMPTS</span> to match CLI defaults. <span class="font-mono">rate_limit</span>
               is <span class="font-mono">Option&lt;RateLimitedScanTiming&gt;</span>; <span class="font-mono">None</span>
               keeps the burst path. This field is source-breaking in crate <span class="font-mono">0.3.0</span>.
+              <span class="font-mono">ApplicationCommand</span> and <span class="font-mono">ApplicationOutcome</span>
+              gained a monitor variant in crate <span class="font-mono">0.4.0</span> and are
+              <span class="font-mono">#[non_exhaustive]</span>. A monitor timeout of zero is
+              <span class="font-mono">AppError::MonitorTimeoutRejected</span>. <span class="font-mono">DEFAULT_MONITOR_TIMEOUT</span>
+              is 30 seconds. <span class="font-mono">MonitorOutcome</span> carries the buffered report; vendor registries
+              do not change its lines.
             </li>
             <li>
               <span class="font-mono">ScanOutcome::discovered_hosts</span> contains
@@ -443,7 +478,8 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
           <p class="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
             To verify frames on the wire, run <span class="font-mono">tcpdump</span> or Wireshark on the same interface
             (for example <span class="font-mono">tcpdump -ni eth0 arp</span>) while scanning. This is optional manual
-            validation and is not part of automated tests.
+            validation and is not part of automated tests. A privileged
+            <span class="font-mono">monitor</span> listen is the same class of manual check and must not transmit.
           </p>
           <p class="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
             For a full acceptance check on hardware you control, build the binary and run a privileged scan such as
