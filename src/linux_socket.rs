@@ -243,6 +243,57 @@ pub fn open_linux_link_layer_endpoint(
     })
 }
 
+/// Capture protocol for passive monitoring.
+///
+/// `ETH_P_ALL` delivers the Ethernet II, single-tag IEEE 802.1Q, service-plus-customer tag, and
+/// RFC 1042 SNAP shapes the existing parser already accepts. `ETH_P_ARP` would hide every frame
+/// whose outermost type is not `0x0806`. The kernel still strips the outermost VLAN tag before
+/// `AF_PACKET` delivery; this socket does not request `PACKET_AUXDATA`, so that stripped tag is
+/// not recovered.
+#[allow(dead_code)] // Called by `open_linux_monitor_link_layer_endpoint`.
+fn monitor_packet_capture_protocol() -> u16 {
+    ETHERNET_PROTOCOL_ALL
+}
+
+/// Opens a raw `AF_PACKET` socket bound to `ETH_P_ALL` for receive-only ARP monitoring.
+///
+/// The endpoint can transmit, but passive monitoring must not call
+/// [`LinkLayerEndpoint::send_ethernet_frame`]. The unused send destination stays `ETH_P_ARP` so
+/// this opener does not advertise a new transmit framing.
+///
+/// # Errors
+///
+/// Returns [`AppError`] when the interface name is invalid or unusable, when the raw socket cannot
+/// be opened or bound (for example missing `CAP_NET_RAW`), or when the interface index does not fit
+/// the link-layer address.
+///
+/// # Panics
+///
+/// This function does not panic.
+#[allow(dead_code)] // Called by the Linux monitor wrapper in the following change.
+pub fn open_linux_monitor_link_layer_endpoint(
+    interface_name: &str,
+) -> Result<LinuxLinkLayerEndpoint, AppError> {
+    let interface_index = validated_interface_index_for_arp_scanning(interface_name)?;
+    let capture_protocol = monitor_packet_capture_protocol();
+    let packet_socket = open_raw_packet_socket(capture_protocol)?;
+    bind_packet_socket_to_interface(
+        &packet_socket,
+        interface_name,
+        interface_index,
+        capture_protocol,
+    )?;
+    let link_layer_destination = link_layer_broadcast_destination_for_scan(
+        interface_name,
+        interface_index,
+        ETHERNET_PROTOCOL_ARP,
+    )?;
+    Ok(LinuxLinkLayerEndpoint {
+        packet_socket,
+        link_layer_destination,
+    })
+}
+
 impl LinkLayerEndpoint for LinuxLinkLayerEndpoint {
     fn send_ethernet_frame(&self, frame: &[u8]) -> std::io::Result<()> {
         linux_system_call::send_to_link_layer(
@@ -292,6 +343,8 @@ impl LinkLayerEndpoint for LinuxLinkLayerEndpoint {
 #[cfg(test)]
 mod tests {
     use super::link_layer_send_protocol_for_wire_options;
+    use super::monitor_packet_capture_protocol;
+    use super::open_linux_monitor_link_layer_endpoint;
     use super::packet_socket_protocol_for_wire_options;
     use super::validate_interface_flags_for_arp_scanning;
     use crate::application_command::ScanWireOptions;
@@ -493,6 +546,45 @@ mod tests {
         assert_eq!(
             send, ETHERNET_PROTOCOL_ARP,
             "with no encodable tag stack the send protocol stays plain ARP"
+        );
+    }
+
+    #[test]
+    fn monitor_capture_protocol_is_eth_p_all() {
+        // Act
+        let protocol = monitor_packet_capture_protocol();
+
+        // Assert
+        assert_eq!(
+            protocol, ETHERNET_PROTOCOL_ALL,
+            "passive monitoring must not bind the narrower ETH_P_ARP capture"
+        );
+    }
+
+    #[test]
+    fn open_linux_monitor_link_layer_endpoint_rejects_loopback() {
+        // Act
+        let outcome = open_linux_monitor_link_layer_endpoint("lo");
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(AppError::InterfaceRejectedForScanning { .. })),
+            "loopback must be rejected before a monitor socket is opened"
+        );
+    }
+
+    #[test]
+    fn open_linux_monitor_link_layer_endpoint_rejects_unknown_interface() {
+        // Act
+        let outcome = open_linux_monitor_link_layer_endpoint("narp_none____");
+
+        // Assert
+        let Err(error) = outcome else {
+            panic!("an unknown interface must fail before socket allocation");
+        };
+        assert!(
+            matches!(error, AppError::InterfaceLookupFailed { .. }),
+            "an unknown interface must fail lookup, got: {error}"
         );
     }
 }

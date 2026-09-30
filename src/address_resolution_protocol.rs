@@ -426,15 +426,19 @@ pub(crate) struct ParsedIpv4EthernetArp {
     pub sender_protocol: Ipv4Addr,
     /// RFC 826 `ar$sha`.
     pub sender_hardware: MacAddress,
+    /// RFC 826 `ar$tha`.
+    pub target_hardware: MacAddress,
+    /// RFC 826 `ar$tpa`.
+    pub target_protocol: Ipv4Addr,
 }
 
 /// Parses an IPv4 ARP packet from a raw Ethernet frame buffer.
 ///
 /// Trailing padding beyond the ARP payload is ignored once the fixed ARP fields are validated.
 /// One IEEE 802.1Q customer tag, an IEEE 802.1Q service tag wrapping one customer tag, and RFC
-/// 1042 LLC/SNAP encapsulation are accepted. Sender hardware and protocol addresses (`ar$sha`,
-/// `ar$spa`) are the values returned, matching RFC 826. Any non-reserved opcode is accepted,
-/// including requests.
+/// 1042 LLC/SNAP encapsulation are accepted. Sender and target hardware and protocol addresses
+/// (`ar$sha`, `ar$spa`, `ar$tha`, `ar$tpa`) are the values returned, matching RFC 826. Any
+/// non-reserved opcode is accepted, including requests.
 ///
 /// # Errors
 ///
@@ -496,11 +500,22 @@ pub(crate) fn try_parse_address_resolution_ipv4_over_ethernet(
         arp[ARP_SENDER_PROTOCOL_OFFSET + 2],
         arp[ARP_SENDER_PROTOCOL_OFFSET + 3],
     );
+    let mut target_mac_octets = [0u8; 6];
+    target_mac_octets
+        .copy_from_slice(&arp[ARP_TARGET_HARDWARE_OFFSET..ARP_TARGET_HARDWARE_OFFSET + 6]);
+    let target_ipv4 = Ipv4Addr::new(
+        arp[ARP_TARGET_PROTOCOL_OFFSET],
+        arp[ARP_TARGET_PROTOCOL_OFFSET + 1],
+        arp[ARP_TARGET_PROTOCOL_OFFSET + 2],
+        arp[ARP_TARGET_PROTOCOL_OFFSET + 3],
+    );
 
     Ok(ParsedIpv4EthernetArp {
         opcode,
         sender_protocol: sender_ipv4,
         sender_hardware: MacAddress::from_octets(sender_mac_octets),
+        target_hardware: MacAddress::from_octets(target_mac_octets),
+        target_protocol: target_ipv4,
     })
 }
 
@@ -965,6 +980,8 @@ mod tests {
         assert_eq!(parsed.opcode, ARP_OPERATION_REQUEST);
         assert_eq!(parsed.sender_protocol, source_ip);
         assert_eq!(parsed.sender_hardware, source_mac);
+        assert_eq!(parsed.target_hardware, MacAddress::from_octets([0; 6]));
+        assert_eq!(parsed.target_protocol, Ipv4Addr::new(192, 168, 0, 2));
     }
 
     #[test]
@@ -1321,6 +1338,40 @@ mod tests {
         assert_eq!(parsed.opcode, ARP_OPERATION_REPLY);
         assert_eq!(parsed.sender_protocol, source_ip);
         assert_eq!(parsed.sender_hardware, source_mac);
+        assert_eq!(parsed.target_hardware, MacAddress::from_octets([0; 6]));
+        assert_eq!(parsed.target_protocol, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(
+            try_parse_address_resolution_reply_ipv4_over_ethernet(&frame),
+            Ok((source_ip, source_mac)),
+            "the public reply parser still returns only the sender tuple"
+        );
+    }
+
+    #[test]
+    fn parses_nonzero_target_hardware_and_broadcast_target_protocol() {
+        // Arrange
+        let source_mac = MacAddress::from_octets([0x02; 6]);
+        let target_mac = MacAddress::BROADCAST;
+        let source_ip = Ipv4Addr::UNSPECIFIED;
+        let target_ip = Ipv4Addr::BROADCAST;
+        let mut frame = reply_fixture(source_mac, source_ip);
+        let arp_start = ETHERNET_II_HEADER_LENGTH;
+        frame[arp_start + 18..arp_start + 24].copy_from_slice(&target_mac.octets());
+        frame[arp_start + 24..arp_start + 28].copy_from_slice(&target_ip.octets());
+
+        // Act
+        let parsed = try_parse_address_resolution_ipv4_over_ethernet(&frame)
+            .expect("boundary target addresses should still parse");
+
+        // Assert
+        assert_eq!(parsed.sender_protocol, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(parsed.target_hardware, target_mac);
+        assert_eq!(parsed.target_protocol, Ipv4Addr::BROADCAST);
+        assert_eq!(
+            try_parse_address_resolution_reply_ipv4_over_ethernet(&frame),
+            Ok((source_ip, source_mac)),
+            "reply parsing must ignore target fields"
+        );
     }
 
     #[test]
