@@ -248,3 +248,17 @@ Resolved fields are encoded through [`AddressResolutionRequestLayout`](src/addre
 **Reason:** Official IEEE RA listings are quoted UTF-8 CSV with CRLF and commas inside organization names. Hand-rolling a RFC 4180 parser would be larger and weaker than the widely used `csv` crate (MIT OR Unlicense; `csv-core`, `itoa`, `ryu`, `serde_core`, `memchr`). The constitution prefers std first, then a vetted crate; putting `csv` in the updater keeps the privileged scan crate's dependency surface unchanged.
 
 **Consequences:** `Cargo.lock` records `csv` 1.4. Dual-licensed `MIT OR Unlicense` is accepted via the existing MIT allow-list entry. Upgrades stay on the updater crate; scan/CI paths never parse IEEE CSV.
+
+## 2026-09-30 — Opt-in strict inter-target rate limiting and retry backoff
+
+**Decision:** Add optional outbound rate limiting for GitHub issue #83 without changing the default burst scan. [`ApplicationCommand::Scan`](src/application_command.rs) gains `rate_limit: Option<RateLimitedScanTiming>`. The crate version moves from `0.2.0` to `0.3.0` because that field, and the matching parameter on `perform_arp_probe` / `perform_arp_scan`, is source-breaking. No new dependency.
+
+- **Default path:** unchanged. Each round still sends every target as fast as the socket allows. `--pacing-ms` sleeps only between rounds. `--timeout-ms` is one receive window after the last round. `--backoff` is a usage error unless a rate flag is present, and the burst path does not apply a backoff factor.
+- **Opt-in path:** `--bandwidth` and `--interval-ms` are mutually exclusive. Bandwidth is a positive decimal integer with an optional case-insensitive decimal `K` (1,000) or `M` (1,000,000). The interval is `ceil(max(encoded_frame_octets + 4-octet FCS, 64) * 8 * 1e9 / bits_per_second)` nanoseconds, computed with checked integer arithmetic from the encoded frame (VLAN, LLC/SNAP, and `--padding` included; the IEEE 802.3 minimum pad still applies). `--interval-ms` is that gap in whole milliseconds. The first send is immediate. Later sends wait until the previous send completed plus the interval. Lateness does not create a catch-up burst, and a failed send still consumes its slot.
+- **Retries:** only on the rate-limited path. After each round the scanner receives for `timeout * backoff^(round-1)`, default factor `1.5`, removes answered targets, and stops when none remain. Receive stays per round, not interleaved after every frame, so replies can queue during a paced round. Before another round the next send is no earlier than both the strict inter-send deadline and the end of that receive window, then `--pacing-ms` is added.
+- **Not congestion control:** there is no token bucket, no adaptive rate, and no parallel sends. Link-layer sockets are unchanged.
+- **Failure:** zero, non-finite, or conflicting CLI values exit `2`. A schedule that does not fit in `Duration` or the monotonic clock is [`AppError::ScanTimingExceedsLimit`](src/error.rs) and is rejected before interface discovery or a raw socket is opened.
+
+**Reason:** A default `/24` is one socket-speed burst. Operators need an original-arp-scan-style outbound ceiling without giving up the existing burst path or turning `--pacing-ms` into per-target delay.
+
+**Consequences:** Library callers of `ApplicationCommand::Scan` and `perform_arp_probe` must be updated for `0.3.0`. Congestion control, `--interval` microsecond suffixes, and the original cumulative catch-up scheduler stay out of scope.

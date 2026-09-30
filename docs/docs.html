@@ -186,7 +186,7 @@
           <pre
             class="mt-4 overflow-x-auto rounded border border-zinc-200 bg-white p-4 font-mono text-sm leading-relaxed text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
           ><code>new-arp-scan interfaces
-new-arp-scan scan [--interface &lt;NAME&gt;] [--host &lt;IPv4&gt;] [--timeout-ms &lt;MILLISECONDS&gt;] [--pacing-ms &lt;MILLISECONDS&gt;] [--attempts &lt;COUNT&gt;] [--mac-vendor-file &lt;PATH&gt;] [--vlan &lt;VID&gt;] [--pcp &lt;PRIORITY&gt;] [--dei] [--svlan &lt;VID&gt;] [--spcp &lt;PRIORITY&gt;] [--sdei] [--padding &lt;HEX&gt;] [--arpspa &lt;IPv4|dest&gt;] [--llc] [--destaddr &lt;MAC&gt;] [--srcaddr &lt;MAC&gt;] [--arpsha &lt;MAC&gt;] [--arptha &lt;MAC&gt;] [--arphrd &lt;UINT&gt;] [--arppro &lt;UINT&gt;] [--arphln &lt;UINT&gt;] [--arppln &lt;UINT&gt;] [--arpop &lt;UINT&gt;]</code></pre>
+new-arp-scan scan [--interface &lt;NAME&gt;] [--host &lt;IPv4&gt;] [--timeout-ms &lt;MILLISECONDS&gt;] [--pacing-ms &lt;MILLISECONDS&gt;] [--attempts &lt;COUNT&gt;] [--bandwidth &lt;BITS_PER_SECOND&gt;] [--interval-ms &lt;MILLISECONDS&gt;] [--backoff &lt;FACTOR&gt;] [--mac-vendor-file &lt;PATH&gt;] [--vlan &lt;VID&gt;] [--pcp &lt;PRIORITY&gt;] [--dei] [--svlan &lt;VID&gt;] [--spcp &lt;PRIORITY&gt;] [--sdei] [--padding &lt;HEX&gt;] [--arpspa &lt;IPv4|dest&gt;] [--llc] [--destaddr &lt;MAC&gt;] [--srcaddr &lt;MAC&gt;] [--arpsha &lt;MAC&gt;] [--arptha &lt;MAC&gt;] [--arphrd &lt;UINT&gt;] [--arppro &lt;UINT&gt;] [--arphln &lt;UINT&gt;] [--arppln &lt;UINT&gt;] [--arpop &lt;UINT&gt;]</code></pre>
           <p class="mt-3 text-sm text-zinc-500 dark:text-zinc-500">
             Built-in help: <span class="font-mono">new-arp-scan --help</span>,
             <span class="font-mono">new-arp-scan interfaces --help</span>,
@@ -222,6 +222,11 @@ new-arp-scan scan [--interface &lt;NAME&gt;] [--host &lt;IPv4&gt;] [--timeout-ms
             <span class="font-mono">--timeout-ms</span> elapses after the last round (default
             <span class="font-mono">3000</span>). Millisecond values that exceed what Linux
             <span class="font-mono">poll(2)</span> accepts are clamped internally.
+            <span class="font-mono">--bandwidth</span> and <span class="font-mono">--interval-ms</span> are an optional
+            outbound rate limit (not congestion control) and are mutually exclusive. Without them, each round still
+            bursts every target. With either flag, sends keep a strict minimum gap from the previous send completion,
+            with no catch-up burst, and each round receives for
+            <span class="font-mono">timeout * backoff^(round-1)</span> before unanswered targets are retried.
           </p>
           <p class="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
             If <span class="font-mono">scan</span> is run without <span class="font-mono">--interface</span> /
@@ -253,6 +258,9 @@ new-arp-scan scan
 
 # Use a custom receive window, pacing between scan rounds, and multiple attempts
 new-arp-scan scan --interface eth0 --timeout-ms 5000 --pacing-ms 10 --attempts 3
+
+# Limit outbound frames to 256 kbit/s (about 2 ms between minimum-size frames)
+new-arp-scan scan --interface eth0 --bandwidth 256K --attempts 3
 
 # Annotate MAC addresses from an IEEE MA-L / MA-M / MA-S / IAB mapping file
 new-arp-scan scan --interface eth0 --mac-vendor-file ieee-oui.txt
@@ -309,9 +317,25 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
               within each round.
             </li>
             <li>
-              <span class="font-mono">--timeout-ms</span> is the receive window after the last round. The default is
-              <span class="font-mono">3000</span>, and values larger than <span class="font-mono">poll(2)</span>
-              accepts are clamped internally.
+              <span class="font-mono">--timeout-ms</span> is the receive window after the last round on the default
+              burst path. The default is <span class="font-mono">3000</span>, and values larger than
+              <span class="font-mono">poll(2)</span> accepts are clamped internally. On the rate-limited path the same
+              timeout is the first round's receive window, and later unanswered rounds use
+              <span class="font-mono">timeout * backoff^(round-1)</span>. Receive stays between rounds, so replies can
+              queue during a paced round.
+            </li>
+            <li>
+              <span class="font-mono">--bandwidth</span> and <span class="font-mono">--interval-ms</span> opt into strict
+              inter-target spacing. They are mutually exclusive, and neither is congestion control.
+              <span class="font-mono">--bandwidth</span> is a positive integer bit rate with an optional
+              <span class="font-mono">K</span> (1,000) or <span class="font-mono">M</span> (1,000,000) suffix. The gap is
+              the ceiling of <span class="font-mono">max(encoded frame + 4-octet FCS, 64) * 8 / bits per second</span>,
+              so 256 kbit/s on a minimum frame is 2 ms. <span class="font-mono">--interval-ms</span> sets that gap in
+              whole milliseconds. The first send is immediate; later sends wait until the previous send completed plus
+              the interval, with no catch-up if a send runs late. <span class="font-mono">--pacing-ms</span> is still
+              extra delay only between rounds, added after both the inter-send deadline and the receive window.
+              <span class="font-mono">--backoff</span> requires a rate flag, defaults to <span class="font-mono">1.5</span>
+              when omitted, and must be a finite factor of at least 1. Answered targets are not retried.
             </li>
             <li>
               Non-fatal send or frame-parse problems are collected as warnings, while fatal interface, socket, receive,
@@ -391,7 +415,9 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
               <span class="font-mono">timeout</span> and <span class="font-mono">pacing</span>, and
               <span class="font-mono">std::num::NonZeroU64</span> for <span class="font-mono">attempts</span>. Use
               <span class="font-mono">DEFAULT_SCAN_TIMEOUT</span>, <span class="font-mono">DEFAULT_SCAN_PACING</span>, and
-              <span class="font-mono">DEFAULT_SCAN_ATTEMPTS</span> to match CLI defaults.
+              <span class="font-mono">DEFAULT_SCAN_ATTEMPTS</span> to match CLI defaults. <span class="font-mono">rate_limit</span>
+              is <span class="font-mono">Option&lt;RateLimitedScanTiming&gt;</span>; <span class="font-mono">None</span>
+              keeps the burst path. This field is source-breaking in crate <span class="font-mono">0.3.0</span>.
             </li>
             <li>
               <span class="font-mono">ScanOutcome::discovered_hosts</span> contains
@@ -422,8 +448,8 @@ new-arp-scan scan --interface eth0 --destaddr 00:11:22:33:44:55</code></pre>
           <p class="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
             For a full acceptance check on hardware you control, build the binary and run a privileged scan such as
             <span class="font-mono">sudo ./target/debug/new-arp-scan scan --interface eth0</span>. Compare default runs
-            with custom <span class="font-mono">--timeout-ms</span>, <span class="font-mono">--pacing-ms</span>, and
-            <span class="font-mono">--attempts</span>
+            with custom <span class="font-mono">--timeout-ms</span>, <span class="font-mono">--pacing-ms</span>,
+            <span class="font-mono">--attempts</span>, and <span class="font-mono">--bandwidth</span>
             values to confirm timing behavior for your network.
           </p>
         </section>

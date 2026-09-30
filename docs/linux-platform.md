@@ -17,6 +17,8 @@ Note that on receive the kernel **always** moves the outermost VLAN tag (`0x8100
 
 This path bypasses the normal UDP/TCP stack for the probe traffic itself. The crate still uses conventional **IPv4 datagram sockets** in a few places for **portable** operations (for example interface enumeration helpers), but **subnet scanning and reply collection** depend on raw packet access.
 
+`--bandwidth`, `--interval-ms`, and `--backoff` do not change this socket. They schedule sends in the shared scanner: the default path still bursts within a round, and the opt-in path waits on the calling thread between targets. `--pacing-ms` remains extra delay between rounds only.
+
 ---
 
 ## Privilege and capability requirements

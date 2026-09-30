@@ -45,6 +45,9 @@ EXAMPLES:
 
   Scan with a custom receive window, pacing between scan rounds, and multiple attempts:
     new-arp-scan scan --interface eth0 --timeout-ms 5000 --pacing-ms 10 --attempts 3
+
+  Limit outbound frames to 256 kbit/s and stretch unanswered retries by 1.5:
+    new-arp-scan scan --interface eth0 --bandwidth 256K --attempts 3
 ";
 
 /// Root command-line interface for `new-arp-scan`.
@@ -221,6 +224,38 @@ pub struct ScanArguments {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub attempts: u64,
+    /// Outbound bit rate between consecutive targets. A positive decimal integer with an optional
+    /// case-insensitive `K` (1,000) or `M` (1,000,000) suffix. Mutually exclusive with
+    /// `--interval-ms`. This spaces requests; it is not congestion control. When omitted, each
+    /// round still sends every target as fast as the socket allows.
+    #[arg(
+        long = "bandwidth",
+        value_name = "BITS_PER_SECOND",
+        value_parser = crate::application_command::parse_bandwidth_bits_per_second,
+        group = "inter_target_rate"
+    )]
+    pub bandwidth_bits_per_second: Option<std::num::NonZeroU64>,
+    /// Minimum milliseconds between consecutive target sends. Mutually exclusive with
+    /// `--bandwidth`. The first send in a scan is immediate; later sends wait until the previous
+    /// send completed plus this interval, with no catch-up burst. `--pacing-ms` remains extra delay
+    /// only between rounds.
+    #[arg(
+        long = "interval-ms",
+        value_name = "MILLISECONDS",
+        value_parser = clap::value_parser!(u64).range(1..),
+        group = "inter_target_rate"
+    )]
+    pub interval_milliseconds: Option<u64>,
+    /// Multiplier for each later unanswered round's receive window. Requires `--bandwidth` or
+    /// `--interval-ms`. Must be a finite factor of at least `1`. When rate limiting is set and this
+    /// flag is omitted, the factor is `1.5`. The default burst path ignores backoff.
+    #[arg(
+        long = "backoff",
+        value_name = "FACTOR",
+        value_parser = crate::application_command::parse_retry_backoff_factor,
+        requires = "inter_target_rate"
+    )]
+    pub retry_backoff_factor: Option<crate::application_command::RetryBackoffFactor>,
 }
 
 #[cfg(test)]
@@ -266,6 +301,9 @@ mod tests {
                     scan.host_ipv4_address.is_none(),
                     "omitted --host should yield None"
                 );
+                assert!(scan.bandwidth_bits_per_second.is_none());
+                assert!(scan.interval_milliseconds.is_none());
+                assert!(scan.retry_backoff_factor.is_none());
             }
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
@@ -590,8 +628,11 @@ mod tests {
             help.contains("--timeout-ms")
                 && help.contains("--pacing-ms")
                 && help.contains("--attempts")
-                && help.contains("--host"),
-            "scan long help should name timing, attempts, and host flags, got:\n{help}"
+                && help.contains("--host")
+                && help.contains("--bandwidth")
+                && help.contains("--interval-ms")
+                && help.contains("--backoff"),
+            "scan long help should name timing, attempts, host, and rate-limit flags, got:\n{help}"
         );
         assert!(
             help.contains("3000"),
@@ -602,6 +643,136 @@ mod tests {
             lower.contains("round"),
             "scan long help should describe pacing as between scan rounds, got:\n{help}"
         );
+        assert!(
+            lower.contains("congestion"),
+            "scan long help should say rate limiting is not congestion control, got:\n{help}"
+        );
+    }
+
+    #[test]
+    fn parses_bandwidth_with_a_decimal_k_suffix_and_the_default_backoff() {
+        // Arrange
+        let arguments = ["new-arp-scan", "scan", "--bandwidth", "256K"];
+
+        // Act
+        let parsed = CliRoot::try_parse_from(arguments).expect("256K bandwidth should parse");
+
+        // Assert
+        let super::CliSubcommand::Scan(scan) = parsed.subcommand.expect("scan") else {
+            panic!("expected scan subcommand");
+        };
+        assert_eq!(
+            scan.bandwidth_bits_per_second
+                .map(std::num::NonZeroU64::get),
+            Some(256_000)
+        );
+        assert!(scan.interval_milliseconds.is_none());
+        assert!(scan.retry_backoff_factor.is_none());
+    }
+
+    #[test]
+    fn parses_interval_milliseconds_with_an_explicit_backoff_factor() {
+        // Arrange
+        let arguments = [
+            "new-arp-scan",
+            "scan",
+            "--interval-ms",
+            "2",
+            "--backoff",
+            "2.0",
+        ];
+
+        // Act
+        let parsed = CliRoot::try_parse_from(arguments).expect("interval and backoff should parse");
+
+        // Assert
+        let super::CliSubcommand::Scan(scan) = parsed.subcommand.expect("scan") else {
+            panic!("expected scan subcommand");
+        };
+        assert_eq!(scan.interval_milliseconds, Some(2));
+        assert_eq!(
+            scan.retry_backoff_factor
+                .expect("explicit backoff")
+                .as_f64()
+                .to_bits(),
+            2.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn returns_error_when_bandwidth_and_interval_are_both_set() {
+        // Arrange
+        let arguments = [
+            "new-arp-scan",
+            "scan",
+            "--bandwidth",
+            "256000",
+            "--interval-ms",
+            "2",
+        ];
+
+        // Act
+        let outcome = CliRoot::try_parse_from(arguments);
+
+        // Assert
+        assert!(
+            outcome.is_err(),
+            "bandwidth and interval are mutually exclusive, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn returns_error_when_backoff_is_set_without_a_rate() {
+        // Arrange
+        let arguments = ["new-arp-scan", "scan", "--backoff", "1.5"];
+
+        // Act
+        let outcome = CliRoot::try_parse_from(arguments);
+
+        // Assert
+        assert!(
+            outcome.is_err(),
+            "--backoff requires --bandwidth or --interval-ms, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn returns_error_for_rejected_rate_limit_tokens() {
+        // Arrange
+        let cases: &[&[&str]] = &[
+            &["new-arp-scan", "scan", "--bandwidth", "0"],
+            &["new-arp-scan", "scan", "--bandwidth", "0K"],
+            &["new-arp-scan", "scan", "--bandwidth", "1.5K"],
+            &["new-arp-scan", "scan", "--bandwidth", "1G"],
+            &["new-arp-scan", "scan", "--interval-ms", "0"],
+            &[
+                "new-arp-scan",
+                "scan",
+                "--bandwidth",
+                "1",
+                "--backoff",
+                "0.5",
+            ],
+            &[
+                "new-arp-scan",
+                "scan",
+                "--bandwidth",
+                "1",
+                "--backoff",
+                "nan",
+            ],
+        ];
+
+        for arguments in cases {
+            // Act
+            let outcome = CliRoot::try_parse_from(*arguments);
+
+            // Assert
+            assert!(
+                outcome.is_err(),
+                "token set {arguments:?} should be a usage error, got: {outcome:?}"
+            );
+        }
     }
 
     #[test]

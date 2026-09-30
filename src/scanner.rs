@@ -9,14 +9,17 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::net::Ipv4Addr;
 use std::num::NonZeroU64;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::scan_timing::{
+    ScanClock, ScheduledRateLimit, retry_receive_window, validate_scan_timing_before_socket,
+};
 
 use crate::address_resolution_protocol::{
     ARP_OPERATION_REPLY, encode_address_resolution_request_from_layout,
     try_parse_address_resolution_ipv4_over_ethernet,
 };
-use crate::application_command::ScanWireOptions;
+use crate::application_command::{RateLimitedScanTiming, ScanWireOptions};
 use crate::application_outcome::{DiscoveredHost, ScanOutcome};
 use crate::error::AppError;
 use crate::ethernet_frame::{ETHERNET_PROTOCOL_ARP, try_parse_ethernet_frame};
@@ -166,6 +169,7 @@ fn run_address_resolution_request_rounds(
     transmit: &ScanTransmitContext,
     scan_round_count: NonZeroU64,
     pacing_between_scan_rounds: Duration,
+    clock: &impl ScanClock,
     warnings: &mut Vec<String>,
 ) {
     let total_rounds = scan_round_count.get();
@@ -178,7 +182,7 @@ fn run_address_resolution_request_rounds(
             total_rounds,
             pacing_between_scan_rounds,
         ) {
-            thread::sleep(pacing_between_scan_rounds);
+            clock.sleep_for(pacing_between_scan_rounds);
         }
     }
 }
@@ -206,18 +210,25 @@ fn send_one_address_resolution_request(
     }
 }
 
-fn collect_address_resolution_replies_until_deadline(
-    endpoint: &mut impl LinkLayerEndpoint,
+fn collect_address_resolution_replies_until_clock_deadline<E, C>(
+    endpoint: &mut E,
     receive_buffer: &mut [u8],
-    deadline: Instant,
+    deadline: C::Timestamp,
+    clock: &C,
     reply_acceptance: &ArpReplyAcceptance,
     warnings: &mut Vec<String>,
-) -> Result<BTreeMap<Ipv4Addr, MacAddress>, AppError> {
+) -> Result<BTreeMap<Ipv4Addr, MacAddress>, AppError>
+where
+    E: LinkLayerEndpoint,
+    C: ScanClock,
+{
     let mut discovered_hosts: BTreeMap<Ipv4Addr, MacAddress> = BTreeMap::new();
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+    while clock.now() < deadline {
+        let remaining = clock.saturating_duration_since(deadline, clock.now());
+        if remaining.is_zero() {
+            break;
+        }
         let timeout_milliseconds = poll_timeout_milliseconds_for_receive_wait(remaining);
-
         if endpoint.wait_until_readable(timeout_milliseconds)? {
             drain_buffered_reply_frames(
                 endpoint,
@@ -226,6 +237,8 @@ fn collect_address_resolution_replies_until_deadline(
                 &mut discovered_hosts,
                 warnings,
             )?;
+        } else {
+            clock.advance_after_unreadable_wait(remaining);
         }
     }
     Ok(discovered_hosts)
@@ -345,6 +358,26 @@ pub(crate) fn full_subnet_scan_plan(
 /// # Panics
 ///
 /// This function does not panic.
+/// Targets, timing, and optional outbound rate for one scan over an already-open endpoint.
+pub(crate) struct EndpointScanRequest<'a> {
+    /// IPv4 addresses to probe, in send order.
+    pub targets: &'a [Ipv4Addr],
+    /// Source MAC, interface IPv4, and on-wire options.
+    pub transmit: &'a ScanTransmitContext,
+    /// Which reply senders are recorded.
+    pub acceptance: &'a ArpReplyAcceptance,
+    /// Base receive window. On the burst path this follows the last round; on the rate-limited
+    /// path it is the round-zero window before backoff.
+    pub receive_timeout_after_last_request: Duration,
+    /// Extra delay between rounds, added after the rate-limited inter-send deadline.
+    pub pacing_between_scan_rounds: Duration,
+    /// How many send rounds to plan.
+    pub scan_round_count: NonZeroU64,
+    /// `None` keeps burst-within-round sends.
+    pub rate_limit: Option<RateLimitedScanTiming>,
+}
+
+#[cfg(test)]
 pub(crate) fn collect_scan_over_endpoint(
     endpoint: &mut impl LinkLayerEndpoint,
     target_ipv4_addresses: &[Ipv4Addr],
@@ -354,28 +387,75 @@ pub(crate) fn collect_scan_over_endpoint(
     pacing_between_scan_rounds: Duration,
     scan_round_count: NonZeroU64,
 ) -> Result<ScanOutcome, AppError> {
-    transmit.wire.validate_ieee_8021q_tag_stack()?;
-    transmit.wire.validate_ieee_8023_mac_client_data()?;
-    let mut warnings = Vec::new();
-
-    run_address_resolution_request_rounds(
+    collect_scan_over_endpoint_with_rate_and_clock(
         endpoint,
-        target_ipv4_addresses,
-        transmit,
-        scan_round_count,
-        pacing_between_scan_rounds,
-        &mut warnings,
-    );
+        &EndpointScanRequest {
+            targets: target_ipv4_addresses,
+            transmit,
+            acceptance,
+            receive_timeout_after_last_request,
+            pacing_between_scan_rounds,
+            scan_round_count,
+            rate_limit: None,
+        },
+        &crate::scan_timing::SystemScanClock,
+    )
+}
 
-    let deadline = Instant::now() + receive_timeout_after_last_request;
-    let mut receive_buffer = [0u8; 4096];
-    let discovered_hosts = collect_address_resolution_replies_until_deadline(
-        endpoint,
-        &mut receive_buffer,
-        deadline,
-        acceptance,
-        &mut warnings,
+pub(crate) fn collect_scan_over_endpoint_with_rate_and_clock<E, C>(
+    endpoint: &mut E,
+    request: &EndpointScanRequest<'_>,
+    clock: &C,
+) -> Result<ScanOutcome, AppError>
+where
+    E: LinkLayerEndpoint,
+    C: ScanClock,
+{
+    request.transmit.wire.validate_ieee_8021q_tag_stack()?;
+    request.transmit.wire.validate_ieee_8023_mac_client_data()?;
+    let scheduled_rate = validate_scan_timing_before_socket(
+        request.receive_timeout_after_last_request,
+        request.pacing_between_scan_rounds,
+        request.scan_round_count,
+        &request.transmit.wire,
+        request.rate_limit,
     )?;
+    let mut warnings = Vec::new();
+    let mut receive_buffer = [0u8; 4096];
+
+    let discovered_hosts = if let Some(scheduled_rate) = scheduled_rate {
+        run_rate_limited_rounds(
+            endpoint,
+            request,
+            &scheduled_rate,
+            clock,
+            &mut receive_buffer,
+            &mut warnings,
+        )?
+    } else {
+        run_address_resolution_request_rounds(
+            endpoint,
+            request.targets,
+            request.transmit,
+            request.scan_round_count,
+            request.pacing_between_scan_rounds,
+            clock,
+            &mut warnings,
+        );
+        let deadline = clock
+            .checked_add(clock.now(), request.receive_timeout_after_last_request)
+            .ok_or(AppError::ScanTimingExceedsLimit {
+                limit: crate::error::ScanTimingLimit::MonotonicDeadline,
+            })?;
+        collect_address_resolution_replies_until_clock_deadline(
+            endpoint,
+            &mut receive_buffer,
+            deadline,
+            clock,
+            request.acceptance,
+            &mut warnings,
+        )?
+    };
 
     let hosts: Vec<DiscoveredHost> = discovered_hosts
         .into_iter()
@@ -392,6 +472,182 @@ pub(crate) fn collect_scan_over_endpoint(
         warnings,
         timing_summary: None,
     })
+}
+
+/// Positional adapter so scripted tests can pass timing fields without building a request value.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn collect_scripted_scan<E, C>(
+    endpoint: &mut E,
+    targets: &[Ipv4Addr],
+    transmit: &ScanTransmitContext,
+    acceptance: &ArpReplyAcceptance,
+    receive_timeout_after_last_request: Duration,
+    pacing_between_scan_rounds: Duration,
+    scan_round_count: NonZeroU64,
+    rate_limit: Option<RateLimitedScanTiming>,
+    clock: &C,
+) -> Result<ScanOutcome, AppError>
+where
+    E: LinkLayerEndpoint,
+    C: ScanClock,
+{
+    collect_scan_over_endpoint_with_rate_and_clock(
+        endpoint,
+        &EndpointScanRequest {
+            targets,
+            transmit,
+            acceptance,
+            receive_timeout_after_last_request,
+            pacing_between_scan_rounds,
+            scan_round_count,
+            rate_limit,
+        },
+        clock,
+    )
+}
+
+fn run_rate_limited_rounds<E, C>(
+    endpoint: &mut E,
+    request: &EndpointScanRequest<'_>,
+    scheduled_rate: &ScheduledRateLimit,
+    clock: &C,
+    receive_buffer: &mut [u8],
+    warnings: &mut Vec<String>,
+) -> Result<BTreeMap<Ipv4Addr, MacAddress>, AppError>
+where
+    E: LinkLayerEndpoint,
+    C: ScanClock,
+{
+    if request.targets.is_empty() {
+        let deadline = monotonic_deadline(clock, request.receive_timeout_after_last_request)?;
+        return collect_address_resolution_replies_until_clock_deadline(
+            endpoint,
+            receive_buffer,
+            deadline,
+            clock,
+            request.acceptance,
+            warnings,
+        );
+    }
+
+    let mut unanswered_targets = request.targets.to_vec();
+    let mut discovered_hosts = BTreeMap::new();
+    let mut last_send: Option<C::Timestamp> = None;
+    let total_rounds = request.scan_round_count.get();
+
+    for round_index in 0..total_rounds {
+        if unanswered_targets.is_empty() {
+            break;
+        }
+        for (index, target_ipv4_address) in unanswered_targets.iter().copied().enumerate() {
+            if index > 0 {
+                wait_until_interval_after_last_send(clock, last_send, scheduled_rate.interval)?;
+            }
+            send_one_address_resolution_request(
+                endpoint,
+                request.transmit,
+                target_ipv4_address,
+                warnings,
+            );
+            clock.after_send();
+            last_send = Some(clock.now());
+        }
+
+        let receive_window = retry_receive_window(
+            request.receive_timeout_after_last_request,
+            scheduled_rate.backoff_factor,
+            round_index,
+        )?;
+        let receive_deadline = monotonic_deadline(clock, receive_window)?;
+        let round_hosts = collect_address_resolution_replies_until_clock_deadline(
+            endpoint,
+            receive_buffer,
+            receive_deadline,
+            clock,
+            request.acceptance,
+            warnings,
+        )?;
+        merge_discovered_host_maps(&mut discovered_hosts, round_hosts, warnings);
+        unanswered_targets
+            .retain(|target_ipv4_address| !discovered_hosts.contains_key(target_ipv4_address));
+        if unanswered_targets.is_empty() {
+            break;
+        }
+        if round_index.saturating_add(1) < total_rounds {
+            wait_until_next_round(
+                clock,
+                last_send,
+                scheduled_rate.interval,
+                request.pacing_between_scan_rounds,
+            )?;
+        }
+    }
+
+    Ok(discovered_hosts)
+}
+
+fn wait_until_interval_after_last_send<C: ScanClock>(
+    clock: &C,
+    last_send: Option<C::Timestamp>,
+    interval: Duration,
+) -> Result<(), AppError> {
+    let Some(last_send) = last_send else {
+        return Ok(());
+    };
+    let earliest = monotonic_deadline_from(clock, last_send, interval)?;
+    clock.sleep_until(earliest);
+    Ok(())
+}
+
+fn wait_until_next_round<C: ScanClock>(
+    clock: &C,
+    last_send: Option<C::Timestamp>,
+    interval: Duration,
+    pacing_between_scan_rounds: Duration,
+) -> Result<(), AppError> {
+    let Some(last_send) = last_send else {
+        return Ok(());
+    };
+    let inter_send_deadline = monotonic_deadline_from(clock, last_send, interval)?;
+    let baseline = inter_send_deadline.max(clock.now());
+    let next_round = monotonic_deadline_from(clock, baseline, pacing_between_scan_rounds)?;
+    clock.sleep_until(next_round);
+    Ok(())
+}
+
+fn monotonic_deadline<C: ScanClock>(
+    clock: &C,
+    duration: Duration,
+) -> Result<C::Timestamp, AppError> {
+    monotonic_deadline_from(clock, clock.now(), duration)
+}
+
+fn monotonic_deadline_from<C: ScanClock>(
+    clock: &C,
+    timestamp: C::Timestamp,
+    duration: Duration,
+) -> Result<C::Timestamp, AppError> {
+    clock
+        .checked_add(timestamp, duration)
+        .ok_or(AppError::ScanTimingExceedsLimit {
+            limit: crate::error::ScanTimingLimit::MonotonicDeadline,
+        })
+}
+
+fn merge_discovered_host_maps(
+    discovered_hosts: &mut BTreeMap<Ipv4Addr, MacAddress>,
+    additional_hosts: BTreeMap<Ipv4Addr, MacAddress>,
+    warnings: &mut Vec<String>,
+) {
+    for (ipv4_address, media_access_control_address) in additional_hosts {
+        merge_address_resolution_reply_sender_into_discovered_hosts(
+            discovered_hosts,
+            ipv4_address,
+            media_access_control_address,
+            warnings,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1483,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
     use super::ArpReplyAcceptance;
     use super::ScanTransmitContext;
     use super::collect_scan_over_endpoint;
+    use super::collect_scripted_scan;
     use crate::address_resolution_protocol::{
         ARP_OPERATION_REPLY, ARP_OPERATION_REQUEST, build_address_resolution_request_ethernet_frame,
     };
@@ -1241,6 +1498,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
     };
     use crate::link_layer_backend::LinkLayerEndpoint;
     use crate::mac_address::MacAddress;
+    use crate::scan_timing::FakeScanClock;
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
     use std::num::NonZeroU64;
@@ -2361,8 +2619,10 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         let (_source_mac, _source_ip, target_ip, transmit, acceptance) =
             default_exact_target_context();
 
+        let clock = FakeScanClock::new();
+
         // Act
-        collect_scan_over_endpoint(
+        collect_scripted_scan(
             &mut endpoint,
             &[target_ip],
             &transmit,
@@ -2370,6 +2630,8 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             Duration::ZERO,
             Duration::from_nanos(1),
             NonZeroU64::new(2).expect("two rounds"),
+            None,
+            &clock,
         )
         .expect("scripted endpoint should not fail");
 
@@ -2378,6 +2640,11 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             endpoint.sent.borrow().len(),
             2,
             "two rounds should send twice"
+        );
+        assert_eq!(
+            clock.sleeps(),
+            vec![Duration::from_nanos(1)],
+            "burst rounds sleep only between rounds"
         );
     }
 
@@ -2760,6 +3027,600 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         assert!(
             endpoint.sent.borrow().is_empty(),
             "no frame should reach the wire when the tag stack is invalid"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rate_limited_scan_timing_tests {
+    use super::{ArpReplyAcceptance, ScanTransmitContext, collect_scripted_scan};
+    use crate::address_resolution_protocol::{
+        ARP_OPERATION_REPLY, build_address_resolution_request_ethernet_frame,
+    };
+    use crate::application_command::{
+        InterTargetSendRate, RateLimitedScanTiming, RetryBackoffFactor, ScanWireOptions,
+    };
+    use crate::error::{AppError, ScanTimingLimit};
+    use crate::ethernet_frame::ETHERNET_II_HEADER_LENGTH;
+    use crate::link_layer_backend::LinkLayerEndpoint;
+    use crate::mac_address::MacAddress;
+    use crate::scan_timing::{FakeScanClock, SystemScanClock};
+    use std::cell::RefCell;
+    use std::net::Ipv4Addr;
+    use std::num::NonZeroU64;
+    use std::time::Duration;
+
+    struct ScriptedEndpoint {
+        sent: RefCell<Vec<Vec<u8>>>,
+        inbound: RefCell<Vec<Vec<u8>>>,
+        fail_sends: bool,
+    }
+
+    impl LinkLayerEndpoint for ScriptedEndpoint {
+        fn send_ethernet_frame(&self, frame: &[u8]) -> std::io::Result<()> {
+            self.sent.borrow_mut().push(frame.to_vec());
+            if self.fail_sends {
+                return Err(std::io::Error::other("injected send failure"));
+            }
+            Ok(())
+        }
+
+        fn wait_until_readable(
+            &self,
+            _timeout_milliseconds: libc::c_int,
+        ) -> Result<bool, AppError> {
+            Ok(!self.inbound.borrow().is_empty())
+        }
+
+        fn try_receive_ethernet_frame(
+            &mut self,
+            buffer: &mut [u8],
+        ) -> Result<Option<usize>, AppError> {
+            let mut inbound = self.inbound.borrow_mut();
+            if inbound.is_empty() {
+                return Ok(None);
+            }
+            let frame = inbound.remove(0);
+            buffer[..frame.len()].copy_from_slice(&frame);
+            Ok(Some(frame.len()))
+        }
+    }
+
+    fn transmit() -> ScanTransmitContext {
+        ScanTransmitContext {
+            source_mac_address: MacAddress::from_octets([0x02, 0, 0, 0, 0, 1]),
+            interface_ipv4_address: Ipv4Addr::new(192, 168, 1, 1),
+            wire: ScanWireOptions::default(),
+        }
+    }
+
+    fn subnet_acceptance() -> ArpReplyAcceptance {
+        ArpReplyAcceptance::SubnetScope {
+            source_ipv4_address: Ipv4Addr::new(192, 168, 1, 1),
+            network_bits: u32::from(Ipv4Addr::new(192, 168, 1, 0)),
+            broadcast_bits: u32::from(Ipv4Addr::new(192, 168, 1, 255)),
+        }
+    }
+
+    fn interval_limit(milliseconds: u64, backoff: f64) -> RateLimitedScanTiming {
+        RateLimitedScanTiming::new(
+            InterTargetSendRate::interval(Duration::from_millis(milliseconds))
+                .expect("test interval is positive"),
+            RetryBackoffFactor::new(backoff).expect("test backoff is at least 1"),
+        )
+    }
+
+    fn reply_from(sender_ip: Ipv4Addr) -> Vec<u8> {
+        let sender_mac = MacAddress::from_octets([0x02, 0, 0, 0, 0, 9]);
+        let mut frame = build_address_resolution_request_ethernet_frame(
+            sender_mac,
+            sender_ip,
+            Ipv4Addr::new(192, 168, 1, 1),
+        )
+        .to_vec();
+        let opcode_offset = ETHERNET_II_HEADER_LENGTH + 6;
+        frame[opcode_offset..opcode_offset + 2].copy_from_slice(&ARP_OPERATION_REPLY.to_be_bytes());
+        frame
+    }
+
+    fn target_ipv4(frame: &[u8]) -> Ipv4Addr {
+        let octets: [u8; 4] = frame[38..42]
+            .try_into()
+            .expect("untagged ARP target protocol address occupies octets 38..42");
+        Ipv4Addr::from(octets)
+    }
+
+    fn endpoint(inbound: Vec<Vec<u8>>, fail_sends: bool) -> ScriptedEndpoint {
+        ScriptedEndpoint {
+            sent: RefCell::new(Vec::new()),
+            inbound: RefCell::new(inbound),
+            fail_sends,
+        }
+    }
+
+    #[test]
+    fn spaces_each_later_send_by_the_interval_and_does_not_sleep_before_the_first() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+        let targets = [
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 11),
+            Ipv4Addr::new(192, 168, 1, 12),
+        ];
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &targets,
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(interval_limit(10, 1.5)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(10); 2]);
+        let sent = link.sent.borrow();
+        assert_eq!(
+            sent.iter()
+                .map(|frame| target_ipv4(frame))
+                .collect::<Vec<_>>(),
+            targets
+        );
+    }
+
+    #[test]
+    fn keeps_the_full_interval_after_a_late_send_instead_of_catching_up() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+        clock.arm_stall_after_next_send(Duration::from_millis(100));
+        let targets = [
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 11),
+            Ipv4Addr::new(192, 168, 1, 12),
+        ];
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &targets,
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(interval_limit(10, 1.0)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(
+            clock.sleeps(),
+            vec![Duration::from_millis(10), Duration::from_millis(10)]
+        );
+    }
+
+    #[test]
+    fn adds_round_pacing_after_the_inter_send_deadline_and_the_receive_window() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+        let targets = [
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 11),
+        ];
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &targets,
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::from_millis(5),
+            NonZeroU64::new(2).expect("two rounds"),
+            Some(interval_limit(10, 1.0)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(
+            clock.sleeps(),
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(15),
+                Duration::from_millis(10),
+            ]
+        );
+        assert_eq!(link.sent.borrow().len(), 4);
+    }
+
+    #[test]
+    fn stretches_each_unanswered_receive_window_by_the_backoff_factor() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &[Ipv4Addr::new(192, 168, 1, 10)],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::from_millis(1000),
+            Duration::ZERO,
+            NonZeroU64::new(3).expect("three rounds"),
+            Some(interval_limit(10, 1.5)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(
+            clock.unreadable_waits(),
+            vec![
+                Duration::from_millis(1000),
+                Duration::from_millis(1500),
+                Duration::from_millis(2250),
+            ]
+        );
+        assert!(
+            clock.sleeps().is_empty(),
+            "a receive window that already covers the next send leaves no extra gap, got: {:?}",
+            clock.sleeps()
+        );
+        assert_eq!(link.sent.borrow().len(), 3);
+    }
+
+    #[test]
+    fn retries_only_targets_that_have_not_answered() {
+        // Arrange
+        let first = Ipv4Addr::new(192, 168, 1, 10);
+        let second = Ipv4Addr::new(192, 168, 1, 11);
+        let mut link = endpoint(vec![reply_from(first)], false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[first, second],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::from_millis(20),
+            Duration::ZERO,
+            NonZeroU64::new(2).expect("two rounds"),
+            Some(interval_limit(10, 1.0)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        let sent_targets: Vec<Ipv4Addr> = link
+            .sent
+            .borrow()
+            .iter()
+            .map(|frame| target_ipv4(frame))
+            .collect();
+        assert_eq!(sent_targets, vec![first, second, second]);
+        assert_eq!(outcome.discovered_hosts.len(), 1);
+        assert_eq!(outcome.discovered_hosts[0].ipv4_address, first);
+        assert_eq!(
+            outcome.discovered_hosts[0].media_access_control_address,
+            MacAddress::from_octets([0x02, 0, 0, 0, 0, 9])
+        );
+    }
+
+    #[test]
+    fn stops_before_later_rounds_when_every_target_has_answered() {
+        // Arrange
+        let first = Ipv4Addr::new(192, 168, 1, 10);
+        let second = Ipv4Addr::new(192, 168, 1, 11);
+        let mut link = endpoint(vec![reply_from(first), reply_from(second)], false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[first, second],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::from_millis(20),
+            Duration::from_millis(50),
+            NonZeroU64::new(3).expect("three rounds"),
+            Some(interval_limit(10, 1.5)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(link.sent.borrow().len(), 2);
+        let discovered: Vec<Ipv4Addr> = outcome
+            .discovered_hosts
+            .iter()
+            .map(|host| host.ipv4_address)
+            .collect();
+        assert_eq!(discovered, vec![first, second]);
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(10)]);
+        assert_eq!(
+            clock.unreadable_waits(),
+            vec![Duration::from_millis(20)],
+            "an answered round still consumes its full receive window"
+        );
+    }
+
+    #[test]
+    fn counts_a_failed_send_as_a_consumed_schedule_slot() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), true);
+        let clock = FakeScanClock::new();
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+                Ipv4Addr::new(192, 168, 1, 12),
+            ],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(interval_limit(10, 1.0)),
+            &clock,
+        )
+        .expect("a failed send is a warning, not a fatal error");
+
+        // Assert
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(10); 2]);
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                "failed to send ARP request to 192.168.1.10: injected send failure".to_string(),
+                "failed to send ARP request to 192.168.1.11: injected send failure".to_string(),
+                "failed to send ARP request to 192.168.1.12: injected send failure".to_string(),
+            ]
+        );
+        assert!(outcome.discovered_hosts.is_empty());
+    }
+
+    #[test]
+    fn burst_path_does_not_insert_inter_target_sleeps() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &[
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+                Ipv4Addr::new(192, 168, 1, 12),
+            ],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            None,
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert!(clock.sleeps().is_empty());
+        let sent_targets: Vec<Ipv4Addr> = link
+            .sent
+            .borrow()
+            .iter()
+            .map(|frame| target_ipv4(frame))
+            .collect();
+        assert_eq!(
+            sent_targets,
+            vec![
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+                Ipv4Addr::new(192, 168, 1, 12),
+            ]
+        );
+    }
+
+    #[test]
+    fn derives_a_two_millisecond_gap_from_256_kilobits_per_second() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+        let rate = RateLimitedScanTiming::new(
+            InterTargetSendRate::bandwidth(256_000).expect("256000 is positive"),
+            RetryBackoffFactor::DEFAULT,
+        );
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &[
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+            ],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(rate),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(2)]);
+    }
+
+    #[test]
+    fn still_waits_the_timeout_when_the_target_list_is_empty() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &[],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::from_millis(5),
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(interval_limit(10, 1.5)),
+            &clock,
+        )
+        .expect("an empty target list should still receive");
+
+        // Assert
+        assert!(link.sent.borrow().is_empty());
+        assert_eq!(clock.unreadable_waits(), vec![Duration::from_millis(5)]);
+    }
+
+    #[test]
+    fn adds_only_round_pacing_when_the_receive_window_already_passed_the_send_deadline() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let clock = FakeScanClock::new();
+
+        // Act
+        collect_scripted_scan(
+            &mut link,
+            &[Ipv4Addr::new(192, 168, 1, 10)],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::from_millis(1000),
+            Duration::from_millis(5),
+            NonZeroU64::new(2).expect("two rounds"),
+            Some(interval_limit(10, 1.0)),
+            &clock,
+        )
+        .expect("scripted endpoint should not fail");
+
+        // Assert
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(5)]);
+        assert_eq!(
+            clock.unreadable_waits(),
+            vec![Duration::from_millis(1000), Duration::from_millis(1000)]
+        );
+        assert_eq!(link.sent.borrow().len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_receive_deadline_the_system_clock_cannot_represent() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::MAX,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(interval_limit(1, 1.0)),
+            &SystemScanClock,
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::ScanTimingExceedsLimit {
+                    limit: ScanTimingLimit::MonotonicDeadline,
+                })
+            ),
+            "Duration::MAX past Instant::now must fail closed, got: {outcome:?}"
+        );
+        assert!(link.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn burst_path_rejects_a_receive_deadline_the_system_clock_cannot_represent() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[Ipv4Addr::new(192, 168, 1, 10)],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::MAX,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            None,
+            &SystemScanClock,
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::ScanTimingExceedsLimit {
+                    limit: ScanTimingLimit::MonotonicDeadline,
+                })
+            ),
+            "the burst receive deadline must fail closed, got: {outcome:?}"
+        );
+        assert_eq!(link.sent.borrow().len(), 1);
+    }
+
+    #[test]
+    fn second_send_fails_when_the_interval_does_not_fit_on_the_system_clock() {
+        // Arrange
+        let mut link = endpoint(Vec::new(), false);
+        let rate = RateLimitedScanTiming::new(
+            InterTargetSendRate::interval(Duration::MAX).expect("max duration is non-zero"),
+            RetryBackoffFactor::new(1.0).expect("unit factor"),
+        );
+
+        // Act
+        let outcome = collect_scripted_scan(
+            &mut link,
+            &[
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+            ],
+            &transmit(),
+            &subnet_acceptance(),
+            Duration::ZERO,
+            Duration::ZERO,
+            NonZeroU64::MIN,
+            Some(rate),
+            &SystemScanClock,
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::ScanTimingExceedsLimit {
+                    limit: ScanTimingLimit::MonotonicDeadline,
+                })
+            ),
+            "the second send's deadline must fail closed, got: {outcome:?}"
+        );
+        assert_eq!(
+            link.sent.borrow().len(),
+            1,
+            "the first send is immediate; the overflow happens before the second"
         );
     }
 }

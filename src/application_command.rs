@@ -346,6 +346,228 @@ pub fn parse_ethernet_padding_hex(token: &str) -> Result<EthernetPaddingOctets, 
     Ok(EthernetPaddingOctets(padding))
 }
 
+/// Original `arp-scan` backoff factor, used when outbound rate limiting is enabled and `--backoff`
+/// is omitted.
+pub const DEFAULT_RETRY_BACKOFF_FACTOR: f64 = 1.5;
+
+/// A [`Duration`] that is strictly greater than zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PositiveDuration(Duration);
+
+impl PositiveDuration {
+    /// Rejects a zero interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::AppError::InterTargetIntervalRejected`] when `duration` is zero.
+    pub fn new(duration: Duration) -> Result<Self, crate::error::AppError> {
+        if duration.is_zero() {
+            Err(crate::error::AppError::InterTargetIntervalRejected)
+        } else {
+            Ok(Self(duration))
+        }
+    }
+
+    /// Returns the wrapped duration.
+    #[must_use]
+    pub const fn as_duration(self) -> Duration {
+        self.0
+    }
+}
+
+/// Finite retry multiplier of at least `1.0`.
+///
+/// Equality compares the IEEE-754 bit pattern, so distinct NaN payloads cannot be constructed.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryBackoffFactor {
+    bits: u64,
+}
+
+impl PartialEq for RetryBackoffFactor {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits == other.bits
+    }
+}
+
+impl Eq for RetryBackoffFactor {}
+
+impl RetryBackoffFactor {
+    /// [`DEFAULT_RETRY_BACKOFF_FACTOR`] (`1.5`).
+    pub const DEFAULT: Self = Self {
+        bits: DEFAULT_RETRY_BACKOFF_FACTOR.to_bits(),
+    };
+
+    /// Accepts a finite factor greater than or equal to one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::AppError::RetryBackoffFactorRejected`] when `factor` is NaN,
+    /// infinite, or less than one.
+    pub fn new(factor: f64) -> Result<Self, crate::error::AppError> {
+        if !factor.is_finite() || factor < 1.0 {
+            return Err(crate::error::AppError::RetryBackoffFactorRejected);
+        }
+        Ok(Self {
+            bits: factor.to_bits(),
+        })
+    }
+
+    /// Returns the factor as `f64`.
+    #[must_use]
+    pub const fn as_f64(self) -> f64 {
+        f64::from_bits(self.bits)
+    }
+}
+
+/// How a rate-limited scan spaces consecutive address-resolution requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum InterTargetSendRate {
+    /// Positive bits per second. The scanner derives the interval from the frame that is about to
+    /// be sent.
+    Bandwidth(NonZeroU64),
+    /// Explicit minimum gap between consecutive sends.
+    Interval(PositiveDuration),
+}
+
+impl InterTargetSendRate {
+    /// Rejects a zero bit rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::AppError::InterTargetBandwidthRejected`] when `bits_per_second` is
+    /// zero. Whether the derived interval fits in [`Duration`] depends on the encoded frame and is
+    /// checked when the scan is validated.
+    pub fn bandwidth(bits_per_second: u64) -> Result<Self, crate::error::AppError> {
+        NonZeroU64::new(bits_per_second)
+            .map(Self::Bandwidth)
+            .ok_or(crate::error::AppError::InterTargetBandwidthRejected)
+    }
+
+    /// Rejects a zero interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::AppError::InterTargetIntervalRejected`] when `interval` is zero.
+    pub fn interval(interval: Duration) -> Result<Self, crate::error::AppError> {
+        Ok(Self::Interval(PositiveDuration::new(interval)?))
+    }
+}
+
+/// Opt-in outbound rate limit and the retry backoff that applies only on that path.
+///
+/// When this value is absent from [`ApplicationCommand::Scan`], each round still bursts every
+/// target and [`ApplicationCommand::Scan`]'s `pacing` sleeps only between rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RateLimitedScanTiming {
+    send_rate: InterTargetSendRate,
+    backoff_factor: RetryBackoffFactor,
+}
+
+impl RateLimitedScanTiming {
+    /// Builds timing from an already validated rate and backoff factor.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use new_arp_scan::{
+    ///     InterTargetSendRate, RateLimitedScanTiming, RetryBackoffFactor,
+    /// };
+    ///
+    /// let timing = RateLimitedScanTiming::new(
+    ///     InterTargetSendRate::interval(Duration::from_millis(2))?,
+    ///     RetryBackoffFactor::DEFAULT,
+    /// );
+    /// assert_eq!(timing.backoff_factor().as_f64().to_bits(), 1.5_f64.to_bits());
+    /// # Ok::<(), new_arp_scan::AppError>(())
+    /// ```
+    #[must_use]
+    pub const fn new(send_rate: InterTargetSendRate, backoff_factor: RetryBackoffFactor) -> Self {
+        Self {
+            send_rate,
+            backoff_factor,
+        }
+    }
+
+    /// Returns the outbound send rate.
+    #[must_use]
+    pub const fn send_rate(self) -> InterTargetSendRate {
+        self.send_rate
+    }
+
+    /// Returns the per-round retry multiplier.
+    #[must_use]
+    pub const fn backoff_factor(self) -> RetryBackoffFactor {
+        self.backoff_factor
+    }
+}
+
+/// Parses `--bandwidth`: a positive decimal integer with an optional `K` or `M` decimal suffix.
+///
+/// `K` is 1,000 and `M` is 1,000,000. The suffix is case-insensitive. Fractional mantissas are
+/// rejected.
+///
+/// # Errors
+///
+/// Returns a message when `token` is empty, not a positive integer, uses an unknown suffix, or the
+/// scaled bit rate does not fit in `u64`.
+pub fn parse_bandwidth_bits_per_second(token: &str) -> Result<NonZeroU64, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "invalid --bandwidth value: expected a positive integer bit rate with an optional K or M decimal suffix"
+                .to_string(),
+        );
+    }
+    let last = trimmed.as_bytes()[trimmed.len() - 1];
+    let (digits, multiplier) = match last {
+        b'K' | b'k' => (&trimmed[..trimmed.len() - 1], 1_000_u64),
+        b'M' | b'm' => (&trimmed[..trimmed.len() - 1], 1_000_000_u64),
+        byte if byte.is_ascii_digit() => (trimmed, 1_u64),
+        byte => {
+            return Err(format!(
+                "invalid --bandwidth value '{token}': unknown suffix '{}'",
+                char::from(byte)
+            ));
+        }
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "invalid --bandwidth value '{token}': expected a positive integer bit rate with an optional K or M decimal suffix"
+        ));
+    }
+    let magnitude = digits.parse::<u64>().map_err(|_| {
+        format!("invalid --bandwidth value '{token}': bit rate does not fit in a 64-bit integer")
+    })?;
+    let bits_per_second = magnitude.checked_mul(multiplier).ok_or_else(|| {
+        format!("invalid --bandwidth value '{token}': bit rate does not fit in a 64-bit integer")
+    })?;
+    NonZeroU64::new(bits_per_second).ok_or_else(|| {
+        format!("invalid --bandwidth value '{token}': bandwidth must be greater than zero")
+    })
+}
+
+/// Parses `--backoff`: a finite decimal factor greater than or equal to one.
+///
+/// # Errors
+///
+/// Returns a message when `token` is not a finite factor of at least one.
+pub fn parse_retry_backoff_factor(token: &str) -> Result<RetryBackoffFactor, String> {
+    let trimmed = token.trim();
+    let factor = trimmed.parse::<f64>().map_err(|_| {
+        format!(
+            "invalid --backoff value '{token}': expected a finite factor greater than or equal to 1"
+        )
+    })?;
+    RetryBackoffFactor::new(factor).map_err(|_| {
+        format!(
+            "invalid --backoff value '{token}': expected a finite factor greater than or equal to 1"
+        )
+    })
+}
+
 /// Default global receive window after the last address resolution request is sent.
 pub const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -371,6 +593,9 @@ pub enum ApplicationCommand {
         pacing: Duration,
         /// Total request rounds: each round sends one broadcast request per target.
         attempts: NonZeroU64,
+        /// Outbound inter-target rate limit and retry backoff. [`None`] keeps the burst-within-round
+        /// path.
+        rate_limit: Option<RateLimitedScanTiming>,
         /// IEEE 802.1Q tagging (customer and optional service tag), RFC 826 field overrides,
         /// Ethernet addressing, and RFC 1042 LLC/SNAP.
         wire: ScanWireOptions,
@@ -383,8 +608,10 @@ pub enum ApplicationCommand {
 mod tests {
     use super::{
         ApplicationCommand, ArpSenderProtocolAddress, DEFAULT_SCAN_ATTEMPTS, DEFAULT_SCAN_PACING,
-        DEFAULT_SCAN_TIMEOUT, EthernetPaddingOctets, ScanWireOptions, parse_ethernet_padding_hex,
-        parse_u8_cli_token, parse_u16_cli_token,
+        DEFAULT_SCAN_TIMEOUT, EthernetPaddingOctets, InterTargetSendRate, RateLimitedScanTiming,
+        RetryBackoffFactor, ScanWireOptions, parse_bandwidth_bits_per_second,
+        parse_ethernet_padding_hex, parse_retry_backoff_factor, parse_u8_cli_token,
+        parse_u16_cli_token,
     };
     use crate::ethernet_frame::{
         Ieee8021qPriorityCodePoint, Ieee8021qTagControlInformation, Ieee8021qTagStack,
@@ -446,6 +673,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             pacing: Duration::from_millis(1),
             attempts: NonZeroU64::new(2).expect("two is non-zero"),
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -454,6 +682,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             pacing: Duration::from_millis(1),
             attempts: NonZeroU64::new(2).expect("two is non-zero"),
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -476,6 +705,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             pacing: Duration::ZERO,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -484,6 +714,7 @@ mod tests {
             timeout: Duration::from_secs(2),
             pacing: Duration::ZERO,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -506,6 +737,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: Duration::from_millis(1),
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -514,6 +746,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: Duration::from_millis(2),
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -536,6 +769,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -544,6 +778,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -566,6 +801,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let explicit = ApplicationCommand::Scan {
@@ -574,6 +810,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -596,6 +833,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: NonZeroU64::new(1).expect("one is non-zero"),
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -604,6 +842,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: NonZeroU64::new(3).expect("three is non-zero"),
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -628,6 +867,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let single_target = ApplicationCommand::Scan {
@@ -636,6 +876,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -660,6 +901,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -668,6 +910,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -692,6 +935,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let second = ApplicationCommand::Scan {
@@ -700,6 +944,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -722,6 +967,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let tagged = ApplicationCommand::Scan {
@@ -730,6 +976,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions {
                 vlan_identifier: Ieee8021qVlanIdentifier::new(10),
                 ..ScanWireOptions::default()
@@ -837,6 +1084,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let probe = ApplicationCommand::Scan {
@@ -845,6 +1093,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions {
                 sender_protocol_address: ArpSenderProtocolAddress::Explicit(Ipv4Addr::UNSPECIFIED),
                 ..ScanWireOptions::default()
@@ -856,6 +1105,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions {
                 llc_snap: true,
                 ..ScanWireOptions::default()
@@ -1151,6 +1401,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
         let padding = ApplicationCommand::Scan {
@@ -1159,6 +1410,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions {
                 padding: vec![0xAA],
                 ..ScanWireOptions::default()
@@ -1170,6 +1422,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions {
                 vlan_priority_code_point: Ieee8021qPriorityCodePoint::new(1).expect("PCP 1 fits"),
                 ..ScanWireOptions::default()
@@ -1351,5 +1604,139 @@ mod tests {
             "an S-TAG and C-TAG must not shift the IEEE 802.3 length field value"
         );
         assert_eq!(stacked_octets, 8 + 28 + 8, "LLC/SNAP + ARP PDU + padding");
+    }
+
+    #[test]
+    fn parses_bandwidth_suffixes_and_rejects_zero_fractions_and_overflow() {
+        // Arrange
+        let accepted = [
+            ("256K", 256_000_u64),
+            ("256k", 256_000),
+            ("  1M", 1_000_000),
+            ("1m", 1_000_000),
+            ("0001K", 1_000),
+            ("256000", 256_000),
+            (&u64::MAX.to_string(), u64::MAX),
+        ];
+
+        // Act
+        for (token, bits_per_second) in accepted {
+            let parsed = parse_bandwidth_bits_per_second(token).expect("accepted bandwidth");
+
+            // Assert
+            assert_eq!(parsed.get(), bits_per_second, "token {token}");
+        }
+
+        let overflow = format!("{}K", (u64::MAX / 1_000) + 1);
+        let rejected = [
+            ("0", "greater than zero"),
+            ("0K", "greater than zero"),
+            ("1.5K", "positive integer"),
+            ("", "positive integer"),
+            ("K", "positive integer"),
+            ("1G", "unknown suffix"),
+            ("+1", "positive integer"),
+            ("0x10", "positive integer"),
+            (overflow.as_str(), "does not fit"),
+        ];
+        for (token, expected_fragment) in rejected {
+            let message = parse_bandwidth_bits_per_second(token)
+                .expect_err("rejected bandwidth")
+                .to_lowercase();
+            assert!(
+                message.contains(expected_fragment),
+                "token {token:?} should mention {expected_fragment}, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_retry_backoff_and_rejects_non_finite_or_sub_unit_factors() {
+        // Arrange
+        let accepted = parse_retry_backoff_factor("1.5").expect("1.5 is the default factor");
+
+        // Act
+        let unit = parse_retry_backoff_factor("1").expect("1 is a valid factor");
+        let below = parse_retry_backoff_factor("0.5");
+        let non_finite = parse_retry_backoff_factor("nan");
+        let infinite = parse_retry_backoff_factor("inf");
+
+        // Assert
+        assert_eq!(accepted, RetryBackoffFactor::DEFAULT);
+        assert_eq!(unit.as_f64().to_bits(), 1.0_f64.to_bits());
+        for outcome in [below, non_finite, infinite] {
+            let message = outcome.expect_err("rejected backoff").to_lowercase();
+            assert!(
+                message.contains("finite factor"),
+                "rejected backoff should name the constraint, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_commands_differ_when_only_the_rate_limit_differs() {
+        // Arrange
+        let burst = ApplicationCommand::Scan {
+            interface_name: None,
+            target_ipv4_address: None,
+            timeout: DEFAULT_SCAN_TIMEOUT,
+            pacing: DEFAULT_SCAN_PACING,
+            attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
+            wire: ScanWireOptions::default(),
+        };
+        let ApplicationCommand::Scan {
+            interface_name,
+            target_ipv4_address,
+            timeout,
+            pacing,
+            attempts,
+            wire,
+            ..
+        } = burst.clone()
+        else {
+            panic!("fixture is a scan command");
+        };
+        let paced = ApplicationCommand::Scan {
+            interface_name,
+            target_ipv4_address,
+            timeout,
+            pacing,
+            attempts,
+            wire,
+            rate_limit: Some(RateLimitedScanTiming::new(
+                InterTargetSendRate::bandwidth(256_000).expect("positive bandwidth"),
+                RetryBackoffFactor::DEFAULT,
+            )),
+        };
+
+        // Act
+        let same = burst == burst.clone();
+        let different = burst != paced;
+
+        // Assert
+        assert!(same);
+        assert!(different);
+    }
+
+    #[test]
+    fn rejects_a_zero_interval_and_a_zero_bandwidth_at_the_typed_boundary() {
+        // Arrange
+        let zero_interval = InterTargetSendRate::interval(std::time::Duration::ZERO);
+        let zero_bandwidth = InterTargetSendRate::bandwidth(0);
+
+        // Act
+        let interval_error = zero_interval.expect_err("zero interval");
+        let bandwidth_error = zero_bandwidth.expect_err("zero bandwidth");
+
+        // Assert
+        assert!(matches!(
+            interval_error,
+            crate::error::AppError::InterTargetIntervalRejected
+        ));
+        assert!(matches!(
+            bandwidth_error,
+            crate::error::AppError::InterTargetBandwidthRejected
+        ));
     }
 }
