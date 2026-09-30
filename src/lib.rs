@@ -605,6 +605,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn monitor_rejects_an_empty_interface_name_when_the_timeout_is_positive() {
+        // Arrange
+        let command = ApplicationCommand::Monitor {
+            interface_name: Some(String::new()),
+            timeout: std::time::Duration::from_millis(1),
+        };
+
+        // Act
+        let outcome = run(command);
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(AppError::InvalidInterfaceName { .. })),
+            "a positive timeout must still reject an empty interface name, got: {outcome:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn monitor_without_an_interface_name_follows_usable_candidate_count() {
+        // Arrange
+        use crate::linux_interface_discovery::enumerate_usable_arp_scan_interface_candidates;
+
+        let candidate_count = enumerate_usable_arp_scan_interface_candidates()
+            .expect("enumeration should succeed on Linux test hosts")
+            .len();
+        let command = ApplicationCommand::Monitor {
+            interface_name: None,
+            timeout: std::time::Duration::from_millis(1),
+        };
+
+        // Act
+        let outcome = run(command);
+
+        // Assert
+        match candidate_count {
+            0 => assert!(
+                matches!(outcome, Err(AppError::AutomaticInterfaceSelectionNoneFound)),
+                "zero usable interfaces should reject automatic monitor selection, got: {outcome:?}"
+            ),
+            1 => assert!(
+                !matches!(
+                    &outcome,
+                    Err(AppError::AutomaticInterfaceSelectionNoneFound
+                        | AppError::AutomaticInterfaceSelectionAmbiguous { .. })
+                ),
+                "exactly one usable interface must pass automatic monitor selection, got: {outcome:?}"
+            ),
+            _ => assert!(
+                matches!(
+                    outcome,
+                    Err(AppError::AutomaticInterfaceSelectionAmbiguous { .. })
+                ),
+                "multiple usable interfaces should make automatic monitor selection ambiguous, got: {outcome:?}"
+            ),
+        }
+    }
+
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn returns_unsupported_platform_when_listing_interfaces_on_unsupported_os() {

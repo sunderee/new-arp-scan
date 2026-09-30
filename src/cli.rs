@@ -311,6 +311,8 @@ mod tests {
         ]);
         let rejected_zero =
             CliRoot::try_parse_from(["new-arp-scan", "monitor", "--timeout-ms", "0"]);
+        let one_millisecond =
+            CliRoot::try_parse_from(["new-arp-scan", "monitor", "--timeout-ms", "1"]);
 
         // Assert
         let parsed = parsed.expect("monitor parsing should succeed");
@@ -332,6 +334,19 @@ mod tests {
             rejected_zero.is_err(),
             "monitor must reject a zero timeout at the command line, got: {rejected_zero:?}"
         );
+        match one_millisecond
+            .expect("a one-millisecond monitor timeout should parse")
+            .subcommand
+            .expect("subcommand should be present")
+        {
+            super::CliSubcommand::Monitor(monitor) => {
+                assert_eq!(monitor.timeout_milliseconds, 1);
+            }
+            super::CliSubcommand::Scan(_) => panic!("expected monitor subcommand, got scan"),
+            super::CliSubcommand::Interfaces => {
+                panic!("expected monitor subcommand, got interfaces");
+            }
+        }
     }
 
     #[test]

@@ -1100,4 +1100,44 @@ mod tests {
             "monitor output must not include vendor names"
         );
     }
+
+    #[test]
+    fn monitor_outcome_puts_conflict_lines_on_stdout_and_warnings_on_stderr() {
+        // Arrange
+        let outcome = ApplicationOutcome::Monitor(MonitorOutcome {
+            report: crate::monitor::MonitorListenOutcome {
+                records: vec![crate::monitor::PassiveArpRecord {
+                    classification: crate::monitor::PassiveArpClass::Conflict,
+                    opcode: 1,
+                    sender_hardware: MacAddress::from_octets([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]),
+                    sender_protocol: Ipv4Addr::new(192, 168, 1, 10),
+                    target_hardware: MacAddress::from_octets([0; 6]),
+                    target_protocol: Ipv4Addr::new(192, 168, 1, 1),
+                    count: 1,
+                }],
+                duplicate_ip_claims: Vec::new(),
+                warnings: vec!["received malformed Ethernet/ARP frame: fixture".to_string()],
+            },
+            interface_name: "eth0".to_string(),
+            elapsed: Duration::from_millis(5),
+        });
+        let mut standard_output = Vec::new();
+        let mut standard_error = Vec::new();
+
+        // Act
+        outcome
+            .write_operator_streams(&mut standard_output, &mut standard_error)
+            .expect("monitor streams should accept a conflict report");
+
+        // Assert
+        assert_eq!(
+            standard_output,
+            b"conflict: request 192.168.1.10 is-at 02:00:00:00:00:02 target 00:00:00:00:00:00 192.168.1.1 count 1\n"
+        );
+        assert_eq!(
+            standard_error,
+            b"warning: received malformed Ethernet/ARP frame: fixture\n\
+              monitor complete: interface eth0, 1 conflict, 0 observations, 0 duplicate-ip claims, 5 ms\n"
+        );
+    }
 }

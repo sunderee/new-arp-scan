@@ -951,8 +951,12 @@ mod tests {
 
         // Assert
         assert_eq!(outcome.records[0].classification, PassiveArpClass::Observed);
-        assert!(stdout_text(&outcome).contains("no conflicts observed"));
-        assert!(!stdout_text(&outcome).contains("conflict:"));
+        assert_eq!(outcome.records[0].count, 1);
+        assert!(outcome.duplicate_ip_claims.is_empty());
+        assert_eq!(
+            stdout_text(&outcome),
+            "observed: request 192.168.1.50 is-at 02:00:00:00:00:09 target 00:00:00:00:00:00 192.168.1.1 count 1\nno conflicts observed\n"
+        );
     }
 
     #[test]
@@ -1326,16 +1330,30 @@ mod tests {
         let oversize_error = listen_for_passive_arp(&mut oversized, &clock, &listen_request);
 
         // Assert
-        assert!(matches!(poll_error, Err(AppError::PollWaitFailed { .. })));
+        assert!(
+            matches!(
+                &poll_error,
+                Err(AppError::PollWaitFailed { source }) if source.to_string() == "poll failed"
+            ),
+            "a wait failure must stay a poll error, got: {poll_error:?}"
+        );
         assert!(waiting.sent.borrow().is_empty());
-        assert!(matches!(
-            receive_error,
-            Err(AppError::RawPacketReceiveFailed { .. })
-        ));
-        assert!(matches!(
-            oversize_error,
-            Err(AppError::RawPacketReceiveFailed { .. })
-        ));
+        assert!(
+            matches!(
+                &receive_error,
+                Err(AppError::RawPacketReceiveFailed { source }) if source.to_string() == "receive failed"
+            ),
+            "an endpoint receive error must stay a receive error, got: {receive_error:?}"
+        );
+        assert!(
+            matches!(
+                &oversize_error,
+                Err(AppError::RawPacketReceiveFailed { source })
+                    if source.kind() == std::io::ErrorKind::InvalidData
+                        && source.to_string() == "receive length exceeds the monitor buffer"
+            ),
+            "a length past the buffer must be invalid data, not a generic receive failure, got: {oversize_error:?}"
+        );
     }
 
     #[test]
@@ -1418,15 +1436,29 @@ mod tests {
     }
 
     #[test]
-    fn poll_timeout_clamps_to_c_int_max() {
+    fn poll_timeout_preserves_fitting_waits_and_clamps_past_c_int_max() {
         // Arrange
-        let huge = Duration::from_millis(u64::MAX);
+        let maximum = u64::try_from(libc::c_int::MAX).expect("c_int::MAX fits in u64");
 
         // Act
-        let timeout = poll_timeout_milliseconds_for_receive_wait(huge);
+        let one_millisecond = poll_timeout_milliseconds_for_receive_wait(Duration::from_millis(1));
+        let at_maximum = poll_timeout_milliseconds_for_receive_wait(Duration::from_millis(maximum));
+        let past_maximum =
+            poll_timeout_milliseconds_for_receive_wait(Duration::from_millis(maximum + 1));
+        let huge = poll_timeout_milliseconds_for_receive_wait(Duration::from_millis(u64::MAX));
 
         // Assert
-        assert_eq!(timeout, libc::c_int::MAX);
+        assert_eq!(
+            one_millisecond, 1,
+            "a 1 ms wait must not collapse to a busy poll"
+        );
+        assert_eq!(at_maximum, libc::c_int::MAX);
+        assert_eq!(
+            past_maximum,
+            libc::c_int::MAX,
+            "a wait past c_int::MAX must clamp instead of wrapping negative"
+        );
+        assert_eq!(huge, libc::c_int::MAX);
     }
 
     #[test]
@@ -1473,6 +1505,306 @@ mod tests {
         // Assert
         assert!(stdout_error.is_err());
         assert!(stderr_error.is_err());
+    }
+
+    #[test]
+    fn target_addresses_keep_otherwise_identical_packets_distinct() {
+        // Arrange
+        let first = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(2),
+            local_ip(),
+            MacAddress::from_octets([0; 6]),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        let different_target = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(2),
+            local_ip(),
+            other_mac(4),
+            Ipv4Addr::new(192, 168, 1, 2),
+        );
+
+        // Act
+        let outcome = run(vec![first.clone(), different_target, first], &[local_ip()]);
+
+        // Assert
+        assert_eq!(outcome.records.len(), 2);
+        assert!(
+            outcome
+                .records
+                .iter()
+                .all(|record| record.classification == PassiveArpClass::Conflict)
+        );
+        assert_eq!(outcome.records[0].count, 2);
+        assert_eq!(outcome.records[1].count, 1);
+        assert_eq!(outcome.records[1].target_hardware, other_mac(4));
+        assert_eq!(
+            outcome.records[1].target_protocol,
+            Ipv4Addr::new(192, 168, 1, 2)
+        );
+    }
+
+    #[test]
+    fn conflicts_print_before_observations_that_arrived_earlier() {
+        // Arrange
+        let observation = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(9),
+            Ipv4Addr::new(192, 168, 1, 50),
+            MacAddress::from_octets([0; 6]),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        let conflict = arp_ethernet_frame(
+            ARP_OPERATION_REPLY,
+            other_mac(2),
+            local_ip(),
+            local_mac(),
+            local_ip(),
+        );
+
+        // Act
+        let outcome = run(vec![observation, conflict], &[local_ip()]);
+
+        // Assert
+        assert_eq!(
+            stdout_text(&outcome),
+            "conflict: reply 192.168.1.10 is-at 02:00:00:00:00:02 target 02:00:00:00:00:01 192.168.1.10 count 1\n\
+             observed: request 192.168.1.50 is-at 02:00:00:00:00:09 target 00:00:00:00:00:00 192.168.1.1 count 1\n"
+        );
+    }
+
+    #[test]
+    fn local_hardware_claiming_a_nonlocal_address_is_observed_and_can_duplicate() {
+        // Arrange
+        let shared = Ipv4Addr::new(10, 1, 2, 3);
+        let ours = arp_ethernet_frame(
+            ARP_OPERATION_REPLY,
+            local_mac(),
+            shared,
+            other_mac(9),
+            local_ip(),
+        );
+        let theirs = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(9),
+            shared,
+            MacAddress::from_octets([0; 6]),
+            local_ip(),
+        );
+
+        // Act
+        let outcome = run(vec![ours, theirs], &[local_ip()]);
+
+        // Assert
+        assert_eq!(outcome.records.len(), 2);
+        assert!(
+            outcome
+                .records
+                .iter()
+                .all(|record| record.classification == PassiveArpClass::Observed)
+        );
+        assert_eq!(
+            outcome.duplicate_ip_claims[0].hardware_addresses,
+            vec![local_mac(), other_mac(9)]
+        );
+        assert!(stdout_text(&outcome).ends_with("no conflicts observed\n"));
+    }
+
+    #[test]
+    fn own_non_reply_opcode_for_a_local_address_is_suppressed() {
+        // Arrange
+        let frame = arp_ethernet_frame(3, local_mac(), second_local_ip(), other_mac(9), local_ip());
+
+        // Act
+        let outcome = run(vec![frame], &[local_ip(), second_local_ip()]);
+
+        // Assert
+        assert!(outcome.records.is_empty());
+        assert!(outcome.warnings.is_empty());
+        assert_eq!(stdout_text(&outcome), "no conflicts observed\n");
+    }
+
+    #[test]
+    fn an_empty_local_address_set_has_no_conflicts() {
+        // Arrange
+        let frame = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(2),
+            local_ip(),
+            MacAddress::from_octets([0; 6]),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        // Act
+        let outcome = run(vec![frame], &[]);
+
+        // Assert
+        assert_eq!(outcome.records.len(), 1);
+        assert_eq!(outcome.records[0].classification, PassiveArpClass::Observed);
+        assert!(stdout_text(&outcome).starts_with("observed: "));
+        assert!(stdout_text(&outcome).ends_with("no conflicts observed\n"));
+    }
+
+    #[test]
+    fn duplicate_claims_follow_first_seen_addresses_and_include_broadcast() {
+        // Arrange
+        let later_numeric = Ipv4Addr::new(10, 9, 9, 9);
+        let earlier_numeric = Ipv4Addr::new(10, 0, 0, 1);
+        let frames = vec![
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(9),
+                later_numeric,
+                local_mac(),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(2),
+                later_numeric,
+                local_mac(),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(4),
+                earlier_numeric,
+                local_mac(),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(5),
+                earlier_numeric,
+                local_mac(),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(6),
+                Ipv4Addr::BROADCAST,
+                local_mac(),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REPLY,
+                other_mac(7),
+                Ipv4Addr::BROADCAST,
+                local_mac(),
+                local_ip(),
+            ),
+        ];
+
+        // Act
+        let outcome = run(frames, &[local_ip()]);
+
+        // Assert
+        assert_eq!(
+            outcome
+                .duplicate_ip_claims
+                .iter()
+                .map(|claim| claim.protocol_address)
+                .collect::<Vec<_>>(),
+            vec![later_numeric, earlier_numeric, Ipv4Addr::BROADCAST]
+        );
+        assert_eq!(
+            outcome.duplicate_ip_claims[0].hardware_addresses,
+            vec![other_mac(2), other_mac(9)]
+        );
+        assert!(
+            outcome
+                .records
+                .iter()
+                .all(|record| record.classification == PassiveArpClass::Observed)
+        );
+    }
+
+    #[test]
+    fn truncation_keeps_only_retained_duplicate_claimants_after_malformed_warnings() {
+        // Arrange
+        let shared = Ipv4Addr::new(10, 1, 2, 3);
+        let retained = [
+            arp_ethernet_frame(
+                ARP_OPERATION_REQUEST,
+                other_mac(9),
+                shared,
+                MacAddress::from_octets([0; 6]),
+                local_ip(),
+            ),
+            arp_ethernet_frame(
+                ARP_OPERATION_REQUEST,
+                other_mac(2),
+                shared,
+                MacAddress::from_octets([0; 6]),
+                local_ip(),
+            ),
+        ];
+        let dropped = arp_ethernet_frame(
+            ARP_OPERATION_REQUEST,
+            other_mac(4),
+            shared,
+            MacAddress::from_octets([0; 6]),
+            local_ip(),
+        );
+        let short = encode_ethernet_ii_frame(
+            MacAddress::BROADCAST,
+            other_mac(2),
+            ETHERNET_PROTOCOL_ARP,
+            &[0u8; 10],
+        );
+        let mut aggregator = PassiveArpAggregator::new(local_mac(), &[local_ip()], 2);
+
+        // Act
+        aggregator.observe(&retained[0]);
+        aggregator.observe(&retained[1]);
+        aggregator.observe(&dropped);
+        aggregator.observe(&short);
+        let outcome = aggregator.finish();
+
+        // Assert
+        assert_eq!(outcome.records.len(), 2);
+        assert_eq!(outcome.duplicate_ip_claims.len(), 1);
+        assert_eq!(
+            outcome.duplicate_ip_claims[0].hardware_addresses,
+            vec![other_mac(2), other_mac(9)]
+        );
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                "received malformed Ethernet/ARP frame: address resolution payload is shorter than IPv4 over Ethernet".to_string(),
+                super::PASSIVE_MONITOR_TRUNCATION_WARNING.to_string(),
+            ]
+        );
+        assert!(
+            super::PASSIVE_MONITOR_TRUNCATION_WARNING.contains("duplicate-ip"),
+            "operators must be told that dropped packets do not extend duplicate claims"
+        );
+    }
+
+    #[test]
+    fn malformed_warning_counts_saturate_per_reason() {
+        // Arrange
+        let mut aggregator = PassiveArpAggregator::new(local_mac(), &[local_ip()], 1);
+        aggregator.record_malformed("first reason");
+        aggregator.malformed[0].count = u64::MAX;
+
+        // Act
+        aggregator.record_malformed("first reason");
+        aggregator.record_malformed("second reason");
+        let outcome = aggregator.finish();
+
+        // Assert
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                format!(
+                    "received malformed Ethernet/ARP frame: first reason ({} occurrences)",
+                    u64::MAX
+                ),
+                "received malformed Ethernet/ARP frame: second reason".to_string(),
+            ]
+        );
     }
 
     proptest::proptest! {
