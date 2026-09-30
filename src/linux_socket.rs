@@ -250,7 +250,6 @@ pub fn open_linux_link_layer_endpoint(
 /// whose outermost type is not `0x0806`. The kernel still strips the outermost VLAN tag before
 /// `AF_PACKET` delivery; this socket does not request `PACKET_AUXDATA`, so that stripped tag is
 /// not recovered.
-#[allow(dead_code)] // Called by `open_linux_monitor_link_layer_endpoint`.
 fn monitor_packet_capture_protocol() -> u16 {
     ETHERNET_PROTOCOL_ALL
 }
@@ -270,7 +269,6 @@ fn monitor_packet_capture_protocol() -> u16 {
 /// # Panics
 ///
 /// This function does not panic.
-#[allow(dead_code)] // Called by the Linux monitor wrapper in the following change.
 pub fn open_linux_monitor_link_layer_endpoint(
     interface_name: &str,
 ) -> Result<LinuxLinkLayerEndpoint, AppError> {

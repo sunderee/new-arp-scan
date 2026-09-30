@@ -127,6 +127,12 @@ fn run_usable_interfaces_list_returns_outcome_on_macos() {
         ApplicationOutcome::Scan(_) => {
             panic!("expected usable interfaces list outcome, got scan outcome");
         }
+        ApplicationOutcome::Monitor(_) => {
+            panic!("expected usable interfaces list outcome, got monitor outcome");
+        }
+        _ => {
+            panic!("expected usable interfaces list outcome");
+        }
     }
 }
 
@@ -152,6 +158,12 @@ fn run_usable_interfaces_list_returns_outcome_on_linux() {
         }
         ApplicationOutcome::Scan(_) => {
             panic!("expected usable interfaces list outcome, got scan outcome");
+        }
+        ApplicationOutcome::Monitor(_) => {
+            panic!("expected usable interfaces list outcome, got monitor outcome");
+        }
+        _ => {
+            panic!("expected usable interfaces list outcome");
         }
     }
 }

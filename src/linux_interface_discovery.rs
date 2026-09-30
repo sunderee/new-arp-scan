@@ -321,7 +321,6 @@ pub fn discover_interface_scan_addresses(
 /// # Panics
 ///
 /// This function does not panic.
-#[allow(dead_code)] // Called by the Linux monitor wrapper in the following change.
 pub fn discover_monitor_interface_identity(
     interface_name: &str,
 ) -> Result<MonitorInterfaceIdentity, AppError> {
@@ -344,7 +343,6 @@ pub fn discover_monitor_interface_identity(
 }
 
 /// Unions `primary_ipv4_address` with every `getifaddrs(3)` address for `interface_name`.
-#[allow(dead_code)] // Called by `discover_monitor_interface_identity`.
 fn configured_ipv4_addresses(
     interface_name: &str,
     primary_ipv4_address: Ipv4Addr,

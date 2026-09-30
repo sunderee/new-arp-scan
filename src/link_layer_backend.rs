@@ -28,7 +28,6 @@ pub struct InterfaceScanAddresses {
 /// Scan discovery keeps a single primary address in [`InterfaceScanAddresses`]. Passive monitoring
 /// matches `ar$spa` against this full set. Addresses are sorted and unique.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by monitor discovery in the following change.
 pub struct MonitorInterfaceIdentity {
     /// Configured IPv4 addresses, in ascending address order, with duplicates removed.
     pub ipv4_addresses: Vec<Ipv4Addr>,
@@ -36,7 +35,6 @@ pub struct MonitorInterfaceIdentity {
     pub source_mac_address: MacAddress,
 }
 
-#[allow(dead_code)] // Used by monitor discovery and the listen loop in the following change.
 impl MonitorInterfaceIdentity {
     /// Builds an identity from `ipv4_addresses`, sorting and removing duplicates.
     ///
@@ -60,13 +58,13 @@ impl MonitorInterfaceIdentity {
     ///
     /// This function does not panic.
     #[must_use]
+    #[allow(dead_code)] // Binary search helper for callers that do not already hold a set.
     pub(crate) fn contains_ipv4(&self, address: Ipv4Addr) -> bool {
         self.ipv4_addresses.binary_search(&address).is_ok()
     }
 }
 
 /// Returns `ipv4_addresses` in ascending order with duplicates removed.
-#[allow(dead_code)] // Called by `MonitorInterfaceIdentity::from_addresses`.
 fn sorted_unique_ipv4_addresses(
     ipv4_addresses: impl IntoIterator<Item = Ipv4Addr>,
 ) -> Vec<Ipv4Addr> {

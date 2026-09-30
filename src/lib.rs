@@ -53,12 +53,14 @@ pub use address_resolution_protocol::{
     try_parse_address_resolution_reply_ipv4_over_ethernet,
 };
 pub use application_command::{
-    ApplicationCommand, ArpSenderProtocolAddress, DEFAULT_RETRY_BACKOFF_FACTOR,
-    DEFAULT_SCAN_ATTEMPTS, DEFAULT_SCAN_PACING, DEFAULT_SCAN_TIMEOUT, InterTargetSendRate,
-    PositiveDuration, RateLimitedScanTiming, RetryBackoffFactor, ScanWireOptions,
+    ApplicationCommand, ArpSenderProtocolAddress, DEFAULT_MONITOR_TIMEOUT,
+    DEFAULT_RETRY_BACKOFF_FACTOR, DEFAULT_SCAN_ATTEMPTS, DEFAULT_SCAN_PACING, DEFAULT_SCAN_TIMEOUT,
+    InterTargetSendRate, PositiveDuration, RateLimitedScanTiming, RetryBackoffFactor,
+    ScanWireOptions,
 };
 pub use application_outcome::ApplicationOutcome;
 pub use application_outcome::DiscoveredHost;
+pub use application_outcome::MonitorOutcome;
 pub use application_outcome::ScanOutcome;
 pub use application_outcome::ScanTimingSummary;
 pub use application_outcome::UsableInterfaceListingRow;
@@ -75,6 +77,7 @@ pub use mac_vendor_registry::{
     DEFAULT_MAC_VENDOR_FILE_NAME, MacVendorRegistry, MacVendorRegistryParseError,
     UNKNOWN_MAC_VENDOR_NAME,
 };
+pub use monitor::{DuplicateIpClaim, MonitorListenOutcome, PassiveArpClass, PassiveArpRecord};
 
 #[cfg(target_os = "linux")]
 pub use linux_scanner::perform_arp_probe;
@@ -98,6 +101,11 @@ pub use linux_scanner::perform_arp_probe;
 /// [`application_outcome::ScanOutcome::timing_summary`] with wall-clock timing, the resolved
 /// interface name, round count, and discovered host count for operator-facing summaries.
 ///
+/// On Linux and macOS, [`ApplicationCommand::Monitor`] listens on the resolved interface without
+/// transmitting. `timeout` must be greater than zero. The outcome reports local-address conflicts,
+/// ordinary ARP observations, and third-party duplicate claims. It is not an RFC 5227 address
+/// conflict detection implementation.
+///
 /// On Linux, [`ApplicationCommand::UsableInterfacesList`] returns interfaces that pass the same
 /// usability rules as automatic scan selection.
 ///
@@ -106,7 +114,8 @@ pub use linux_scanner::perform_arp_probe;
 /// # Errors
 ///
 /// Returns [`AppError`] for invalid input, unsupported platforms, interface validation failures,
-/// discovery failures, socket failures, and fatal receive or poll failures.
+/// discovery failures, socket failures, and fatal receive or poll failures. A monitor timeout of
+/// zero is [`AppError::MonitorTimeoutRejected`] before discovery or a socket is opened.
 ///
 /// # Examples
 ///
@@ -158,6 +167,10 @@ pub fn run(command: ApplicationCommand) -> Result<ApplicationOutcome, AppError> 
             wire,
             rate_limit,
         ),
+        ApplicationCommand::Monitor {
+            interface_name,
+            timeout,
+        } => run_passive_arp_monitor(interface_name.as_deref(), timeout),
         ApplicationCommand::UsableInterfacesList => {
             #[cfg(target_os = "linux")]
             {
@@ -180,6 +193,50 @@ pub fn run(command: ApplicationCommand) -> Result<ApplicationOutcome, AppError> 
                 })
             }
         }
+    }
+}
+
+fn run_passive_arp_monitor(
+    interface_name: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<ApplicationOutcome, AppError> {
+    monitor::monitor_deadline(&scan_timing::SystemScanClock, timeout)?;
+    if let Some(name) = interface_name {
+        interface_validation::validate_interface_name_for_linux_packet_socket(name)?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let resolved_interface_name =
+            linux_interface_discovery::resolve_scan_interface_name(interface_name)?;
+        let started = std::time::Instant::now();
+        let report = linux_monitor::perform_passive_arp_monitor(&resolved_interface_name, timeout)?;
+        Ok(ApplicationOutcome::Monitor(MonitorOutcome::from_listen(
+            resolved_interface_name,
+            started.elapsed(),
+            report,
+        )))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let resolved_interface_name =
+            macos_interface_discovery::resolve_scan_interface_name(interface_name)?;
+        let started = std::time::Instant::now();
+        let report = macos_monitor::perform_passive_arp_monitor(&resolved_interface_name, timeout)?;
+        Ok(ApplicationOutcome::Monitor(MonitorOutcome::from_listen(
+            resolved_interface_name,
+            started.elapsed(),
+            report,
+        )))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = interface_name;
+        Err(AppError::UnsupportedPlatform {
+            operating_system: std::env::consts::OS.to_string(),
+        })
     }
 }
 
@@ -473,6 +530,78 @@ mod tests {
         assert!(
             matches!(outcome, Err(AppError::UnsupportedPlatform { .. })),
             "unsupported hosts should reject scan before backend dispatch, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_rejects_an_unrepresentable_deadline_before_discovery() {
+        // Arrange
+        let command = ApplicationCommand::Monitor {
+            interface_name: Some("eth0".to_string()),
+            timeout: std::time::Duration::MAX,
+        };
+
+        // Act
+        let outcome = run(command);
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::ScanTimingExceedsLimit {
+                    limit: ScanTimingLimit::MonotonicDeadline,
+                })
+            ),
+            "Duration::MAX must fail the monotonic deadline check, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_rejects_zero_timeout_before_using_the_interface_name() {
+        // Arrange
+        let command = ApplicationCommand::Monitor {
+            interface_name: Some(String::new()),
+            timeout: std::time::Duration::ZERO,
+        };
+
+        // Act
+        let outcome = run(command);
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(AppError::MonitorTimeoutRejected)),
+            "a zero monitor timeout must fail before interface validation, got: {outcome:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn monitor_rejects_loopback_and_unknown_interfaces_on_linux() {
+        // Arrange
+        let loopback = ApplicationCommand::Monitor {
+            interface_name: Some("lo".to_string()),
+            timeout: std::time::Duration::from_millis(1),
+        };
+        let unknown = ApplicationCommand::Monitor {
+            interface_name: Some("narp_none____".to_string()),
+            timeout: std::time::Duration::from_millis(1),
+        };
+
+        // Act
+        let loopback_outcome = run(loopback);
+        let unknown_outcome = run(unknown);
+
+        // Assert
+        assert!(
+            matches!(
+                loopback_outcome,
+                Err(AppError::InterfaceRejectedForScanning { .. })
+            ),
+            "loopback must be rejected before a monitor socket opens, got: {loopback_outcome:?}"
+        );
+        assert!(
+            matches!(unknown_outcome, Err(AppError::InterfaceLookupFailed { .. })),
+            "an unknown interface must fail lookup, got: {unknown_outcome:?}"
         );
     }
 

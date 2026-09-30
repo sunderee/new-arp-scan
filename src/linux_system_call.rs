@@ -352,7 +352,6 @@ pub fn poll_socket_readiness(
 
 /// One IPv4 address reported by `getifaddrs(3)` for a named interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Returned by `list_interface_ipv4_addresses`.
 pub struct InterfaceIpv4AddressRecord {
     /// Kernel interface name (`ifa_name`).
     pub interface_name: String,
@@ -361,7 +360,6 @@ pub struct InterfaceIpv4AddressRecord {
 }
 
 /// Owns the `getifaddrs(3)` list head and releases it with `freeifaddrs(3)` on drop.
-#[allow(dead_code)] // Owns the list inside `list_interface_ipv4_addresses`.
 struct InterfaceAddressListGuard(*mut libc::ifaddrs);
 
 impl Drop for InterfaceAddressListGuard {
@@ -380,7 +378,6 @@ impl Drop for InterfaceAddressListGuard {
 ///
 /// The four octets at `sin_addr.s_addr` are the address in wire order. `s_addr.to_be_bytes()` would
 /// permute those octets on little-endian hosts.
-#[allow(dead_code)] // Called while lowering `getifaddrs(3)` records.
 fn ipv4_address_from_sockaddr(sockaddr: &libc::sockaddr) -> Option<std::net::Ipv4Addr> {
     if libc::c_int::from(sockaddr.sa_family) != libc::AF_INET {
         return None;
@@ -417,7 +414,6 @@ fn ipv4_address_from_sockaddr(sockaddr: &libc::sockaddr) -> Option<std::net::Ipv
 /// # Panics
 ///
 /// This function does not panic.
-#[allow(dead_code)] // Called by Linux monitor discovery in the following change.
 pub fn list_interface_ipv4_addresses() -> std::io::Result<Vec<InterfaceIpv4AddressRecord>> {
     let mut list_head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs(3)` either writes a list head into `list_head` and returns 0, or returns
@@ -446,7 +442,6 @@ pub fn list_interface_ipv4_addresses() -> std::io::Result<Vec<InterfaceIpv4Addre
 ///
 /// Returns [`None`] for a missing name, a non-UTF-8 name, a missing address, or a non-`AF_INET`
 /// address.
-#[allow(dead_code)] // Called by `list_interface_ipv4_addresses`.
 fn interface_ipv4_address_record_from_ifaddrs(
     node: &libc::ifaddrs,
 ) -> Option<InterfaceIpv4AddressRecord> {

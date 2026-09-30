@@ -50,7 +50,6 @@ struct InterfaceAccumulator {
     interface_flags: libc::c_uint,
     source_ipv4_address: Option<Ipv4Addr>,
     ipv4_netmask: Option<Ipv4Addr>,
-    #[allow(dead_code)] // Read by `monitor_identity_from_records`.
     ipv4_addresses: Vec<Ipv4Addr>,
     link_layer: Option<(u8, [u8; 6])>,
 }
@@ -259,7 +258,6 @@ pub fn discover_interface_scan_addresses(
 ///
 /// Scan classification still keeps only the first IPv4 address. This function keeps every `AF_INET`
 /// address on `interface_name` after the same usability checks.
-#[allow(dead_code)] // Called by `discover_monitor_interface_identity`.
 fn monitor_identity_from_records(
     records: &[InterfaceAddressRecord],
     interface_name: &str,
@@ -305,7 +303,6 @@ fn monitor_identity_from_records(
 /// # Panics
 ///
 /// This function does not panic.
-#[allow(dead_code)] // Called by the macOS monitor wrapper in the following change.
 pub fn discover_monitor_interface_identity(
     interface_name: &str,
 ) -> Result<MonitorInterfaceIdentity, AppError> {

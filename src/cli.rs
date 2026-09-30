@@ -10,6 +10,9 @@ EXAMPLES:
   List interfaces usable for ARP scanning on Linux:
     new-arp-scan interfaces
 
+  Listen for ARP conflicts without transmitting (requires CAP_NET_RAW or root):
+    new-arp-scan monitor --interface eth0
+
   Scan the local IPv4 subnet on Linux (requires CAP_NET_RAW or equivalent):
     new-arp-scan scan --interface eth0
 
@@ -69,8 +72,32 @@ pub struct CliRoot {
 pub enum CliSubcommand {
     /// Scan the interface's local IPv4 subnet using address resolution protocol requests.
     Scan(ScanArguments),
+    /// Listen-only: report local IPv4 address conflicts without transmitting.
+    ///
+    /// This is a diagnostic report, not RFC 5227 address conflict detection: it sends no frames
+    /// and does not defend or abandon an address. ARP is unauthenticated, so a reported conflict
+    /// can be spoofed. Requires `CAP_NET_RAW` or root on Linux, and root on macOS. The default
+    /// listen window is 30000 milliseconds.
+    Monitor(MonitorArguments),
     /// List interfaces that are usable for ARP scanning on Linux.
     Interfaces,
+}
+
+/// Arguments for [`CliSubcommand::Monitor`].
+#[derive(Debug, Args)]
+pub struct MonitorArguments {
+    /// Network interface name (for example `eth0`). When omitted, a single usable interface must
+    /// exist or automatic selection fails.
+    #[arg(long = "interface", value_name = "NAME", visible_alias = "iface")]
+    pub interface_name: Option<String>,
+    /// How long to listen, in milliseconds. Must be at least 1. Default: 30000.
+    #[arg(
+        long = "timeout-ms",
+        value_name = "MILLISECONDS",
+        default_value_t = 30_000,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub timeout_milliseconds: u64,
 }
 
 /// Arguments for [`CliSubcommand::Scan`].
@@ -268,6 +295,46 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
+    fn parses_monitor_with_a_thirty_second_default_and_rejects_scan_only_flags() {
+        // Arrange
+        let arguments = ["new-arp-scan", "monitor", "--interface", "eth0"];
+
+        // Act
+        let parsed = CliRoot::try_parse_from(arguments);
+        let rejected_host = CliRoot::try_parse_from([
+            "new-arp-scan",
+            "monitor",
+            "--interface",
+            "eth0",
+            "--host",
+            "192.0.2.1",
+        ]);
+        let rejected_zero =
+            CliRoot::try_parse_from(["new-arp-scan", "monitor", "--timeout-ms", "0"]);
+
+        // Assert
+        let parsed = parsed.expect("monitor parsing should succeed");
+        match parsed.subcommand.expect("subcommand should be present") {
+            super::CliSubcommand::Monitor(monitor) => {
+                assert_eq!(monitor.interface_name.as_deref(), Some("eth0"));
+                assert_eq!(monitor.timeout_milliseconds, 30_000);
+            }
+            super::CliSubcommand::Scan(_) => panic!("expected monitor subcommand, got scan"),
+            super::CliSubcommand::Interfaces => {
+                panic!("expected monitor subcommand, got interfaces");
+            }
+        }
+        assert!(
+            rejected_host.is_err(),
+            "monitor must not accept scan-only --host, got: {rejected_host:?}"
+        );
+        assert!(
+            rejected_zero.is_err(),
+            "monitor must reject a zero timeout at the command line, got: {rejected_zero:?}"
+        );
+    }
+
+    #[test]
     fn parses_scan_subcommand_with_interface_name() {
         // Arrange
         let arguments = ["new-arp-scan", "scan", "--interface", "eth0"];
@@ -308,6 +375,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -349,6 +417,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -389,6 +458,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -478,6 +548,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -516,6 +587,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -811,6 +883,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -849,6 +922,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -930,6 +1004,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -962,6 +1037,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1071,6 +1147,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1110,6 +1187,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1164,6 +1242,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1188,6 +1267,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1220,6 +1300,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1244,6 +1325,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1273,6 +1355,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
         match parsed_maximum
             .expect("VID 4095 should parse")
@@ -1289,6 +1372,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1347,6 +1431,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1416,6 +1501,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1446,6 +1532,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
         match parsed_upper
             .expect("DEST should parse")
@@ -1461,6 +1548,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
         match parsed_explicit
             .expect("dotted-quad should parse")
@@ -1478,6 +1566,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1502,6 +1591,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1560,6 +1650,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1581,6 +1672,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1706,6 +1798,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1740,6 +1833,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1807,6 +1901,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1831,6 +1926,7 @@ mod tests {
             super::CliSubcommand::Interfaces => {
                 panic!("expected scan subcommand, got interfaces");
             }
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1894,6 +1990,7 @@ mod tests {
                 assert!(scan.service_vlan_drop_eligible_indicator);
             }
             super::CliSubcommand::Interfaces => panic!("expected scan subcommand, got interfaces"),
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1920,6 +2017,7 @@ mod tests {
                 );
             }
             super::CliSubcommand::Interfaces => panic!("expected scan subcommand, got interfaces"),
+            super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
         }
     }
 
@@ -1943,6 +2041,7 @@ mod tests {
                     assert_eq!(scan.service_vlan_identifier, Some(expected));
                 }
                 super::CliSubcommand::Interfaces => panic!("expected scan subcommand"),
+                super::CliSubcommand::Monitor(_) => panic!("unexpected monitor subcommand"),
             }
         }
         assert_eq!(

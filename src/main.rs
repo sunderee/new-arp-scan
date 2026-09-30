@@ -67,6 +67,26 @@ fn main() {
                     }
                 }
             }
+            Some(CliSubcommand::Monitor(monitor)) => {
+                match new_arp_scan::run(ApplicationCommand::Monitor {
+                    interface_name: monitor.interface_name,
+                    timeout: Duration::from_millis(monitor.timeout_milliseconds),
+                }) {
+                    Ok(outcome) => {
+                        let mut standard_output = std::io::stdout().lock();
+                        let mut standard_error = std::io::stderr().lock();
+                        outcome
+                            .write_operator_streams(&mut standard_output, &mut standard_error)
+                            .expect(
+                                "writing operator output to standard streams should succeed for a CLI binary",
+                            );
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             Some(CliSubcommand::Interfaces) => {
                 match new_arp_scan::run(ApplicationCommand::UsableInterfacesList) {
                     Ok(outcome) => {

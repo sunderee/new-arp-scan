@@ -3,11 +3,6 @@
 //! Discovers every IPv4 address on the interface, opens the existing Berkeley Packet Filter
 //! endpoint, and delegates classification to [`crate::monitor`]. The listen loop never sends.
 
-#![allow(
-    dead_code,
-    reason = "the library command calls this module in the following change"
-)]
-
 use std::time::Duration;
 
 use crate::error::AppError;

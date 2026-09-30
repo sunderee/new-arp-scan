@@ -2,8 +2,9 @@
 //!
 //! Operator-visible bytes match [`ApplicationOutcome::write_operator_streams`], which the
 //! `new-arp-scan` binary calls after [`crate::run`]: scan warnings and optional timing on standard
-//! error, host lines (or `no hosts found`) on standard output, and interface tables on standard
-//! output.
+//! error, host lines (or `no hosts found`) on standard output, interface tables on standard
+//! output, and passive-monitor conflict lines on standard output with warnings and a completion
+//! summary on standard error.
 
 use std::fmt::Write;
 use std::io::Write as IoWrite;
@@ -13,6 +14,7 @@ use std::time::Duration;
 
 use crate::mac_address::MacAddress;
 use crate::mac_vendor_registry::{MacVendorRegistry, UNKNOWN_MAC_VENDOR_NAME};
+use crate::monitor::{self, MonitorListenOutcome};
 
 const USABLE_INTERFACE_TABLE_NAME_WIDTH: usize = 16;
 const USABLE_INTERFACE_TABLE_INDEX_WIDTH: usize = 6;
@@ -239,11 +241,41 @@ impl UsableInterfacesListOutcome {
     }
 }
 
-/// Successful outcome of [`crate::run`].
+/// Buffered result of one passive ARP listen.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOutcome {
+    /// Aggregated packets, duplicate claims, and warnings from the listen window.
+    pub report: MonitorListenOutcome,
+    /// Interface the listen was bound to.
+    pub interface_name: String,
+    /// Wall time from interface resolution through the end of the listen.
+    pub elapsed: Duration,
+}
+
+impl MonitorOutcome {
+    pub(crate) fn from_listen(
+        interface_name: String,
+        elapsed: Duration,
+        report: MonitorListenOutcome,
+    ) -> Self {
+        Self {
+            report,
+            interface_name,
+            elapsed,
+        }
+    }
+}
+
+/// Successful outcome of [`crate::run`].
+///
+/// New outcomes may be added. Match with a wildcard outside this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApplicationOutcome {
     /// Completed scan on Linux.
     Scan(ScanOutcome),
+    /// Completed passive ARP listen.
+    Monitor(MonitorOutcome),
     /// Listed interfaces usable for ARP scanning on Linux.
     UsableInterfacesList(UsableInterfacesListOutcome),
 }
@@ -252,7 +284,9 @@ impl ApplicationOutcome {
     /// Writes the same bytes the `new-arp-scan` binary writes for this outcome.
     ///
     /// Scan outcomes emit warnings on `standard_error` first, then host lines or `no hosts found`
-    /// on `standard_output`, then an optional timing summary line on `standard_error`. Interface
+    /// on `standard_output`, then an optional timing summary line on `standard_error`. Passive
+    /// monitor outcomes emit labeled conflict, observation, and duplicate lines on
+    /// `standard_output`, then warnings and a completion summary on `standard_error`. Interface
     /// listings write the formatted table to `standard_output` only.
     ///
     /// # Errors
@@ -290,7 +324,8 @@ impl ApplicationOutcome {
     /// when `mac_vendor_registry` is [`Some`].
     ///
     /// With a registry, each host line is `<IPv4> <MAC> <vendor>` (or `(Unknown)` when no prefix
-    /// matches). Without a registry, host lines stay `<IPv4> <MAC>`.
+    /// matches). Without a registry, host lines stay `<IPv4> <MAC>`. Passive monitor lines are
+    /// unchanged by the registry.
     ///
     /// # Errors
     ///
@@ -335,6 +370,15 @@ impl ApplicationOutcome {
                 let table = listing_outcome.format_plain_columns_table();
                 write!(standard_output, "{table}")?;
             }
+            ApplicationOutcome::Monitor(monitor_outcome) => {
+                monitor::write_monitor_stdout(&monitor_outcome.report, standard_output)?;
+                monitor::write_monitor_stderr(
+                    &monitor_outcome.report,
+                    &monitor_outcome.interface_name,
+                    monitor_outcome.elapsed,
+                    standard_error,
+                )?;
+            }
         }
         Ok(())
     }
@@ -365,6 +409,7 @@ fn format_discovered_host_line(
 mod tests {
     use super::ApplicationOutcome;
     use super::DiscoveredHost;
+    use super::MonitorOutcome;
     use super::ScanOutcome;
     use super::ScanTimingSummary;
     use super::UsableInterfaceListingRow;
@@ -1005,6 +1050,51 @@ mod tests {
         assert_eq!(
             standard_output, b"no hosts found\n",
             "standard output should be written before the timing summary hits standard error"
+        );
+    }
+
+    #[test]
+    fn monitor_outcome_prints_an_empty_listen_and_ignores_the_vendor_registry() {
+        // Arrange
+        let outcome = ApplicationOutcome::Monitor(MonitorOutcome {
+            report: crate::monitor::MonitorListenOutcome {
+                records: Vec::new(),
+                duplicate_ip_claims: Vec::new(),
+                warnings: Vec::new(),
+            },
+            interface_name: "eth0".to_string(),
+            elapsed: Duration::from_secs(30),
+        });
+        let registry = crate::mac_vendor_registry::MacVendorRegistry::parse_ieee_oui_text(
+            "F4A475\tIntel Corporate\n",
+        )
+        .expect("fixture vendor text should parse");
+        let mut standard_output = Vec::new();
+        let mut standard_error = Vec::new();
+
+        // Act
+        outcome
+            .write_operator_streams_with_mac_vendor_registry(
+                &mut standard_output,
+                &mut standard_error,
+                Some(&registry),
+            )
+            .expect("monitor streams should accept a vendor registry");
+
+        // Assert
+        assert_eq!(
+            standard_output, b"no conflicts observed\n",
+            "an empty listen should say no conflicts were observed"
+        );
+        assert_eq!(
+            standard_error,
+            b"monitor complete: interface eth0, 0 conflicts, 0 observations, 0 duplicate-ip claims, 30000 ms\n"
+        );
+        assert!(
+            !standard_output
+                .windows(b"Intel".len())
+                .any(|window| window == b"Intel"),
+            "monitor output must not include vendor names"
         );
     }
 }

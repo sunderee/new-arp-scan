@@ -5,11 +5,6 @@
 //! timeout. Distinct packet records are capped, repeated records increment a saturating count, and
 //! unrelated Ethernet frames stay silent.
 
-#![allow(
-    dead_code,
-    reason = "the library command calls this module in the following change"
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -47,7 +42,7 @@ pub(crate) struct MonitorListenRequest<'a> {
 
 /// Whether a retained ARP packet conflicts with a local address or is only observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PassiveArpClass {
+pub enum PassiveArpClass {
     /// RFC 5227-style conflict: request or reply, local `ar$spa`, foreign `ar$sha`.
     Conflict,
     /// Any other well-formed ARP packet that was not sent by this interface.
@@ -56,7 +51,7 @@ pub(crate) enum PassiveArpClass {
 
 /// One aggregated ARP packet identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PassiveArpRecord {
+pub struct PassiveArpRecord {
     /// Conflict or ordinary observation. A packet is never both.
     pub classification: PassiveArpClass,
     /// RFC 826 `ar$op`.
@@ -75,7 +70,7 @@ pub(crate) struct PassiveArpRecord {
 
 /// Nonlocal, non-zero IPv4 address claimed by more than one hardware address.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DuplicateIpClaim {
+pub struct DuplicateIpClaim {
     /// Shared `ar$spa`.
     pub protocol_address: Ipv4Addr,
     /// Distinct `ar$sha` values, in ascending hardware-address order.
@@ -84,7 +79,7 @@ pub(crate) struct DuplicateIpClaim {
 
 /// Buffered result of one passive listen.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MonitorListenOutcome {
+pub struct MonitorListenOutcome {
     /// Conflict and observation records in first-seen order.
     pub records: Vec<PassiveArpRecord>,
     /// Third-party duplicate claims in the order their IPv4 address was first seen.
