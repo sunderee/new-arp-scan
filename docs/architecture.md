@@ -18,7 +18,7 @@ Tracked for release documentation: [GitHub issue #33](https://github.com/Bizjak-
 | **Name / shape checks** | `interface_validation.rs` | Interface name rules and `ifreq` name packing helpers (shared by both backends). |
 | **Link and ARP encoding** | `mac_address.rs`, `ethernet_frame.rs`, `address_resolution_protocol.rs` | Types and on-wire framing for Ethernet II + ARP; IEEE 802.1Q send (`--vlan`, `--pcp`, `--dei`) and receive; IEEE 802.1ad service tag send (`--svlan`, `--spcp`, `--sdei`) and receive; RFC 1042 SNAP send (`--llc`) and receive; RFC 5227 Probe/Announcement (`--arpspa`); Ethernet `--destaddr`/`--srcaddr`, remaining RFC 826 `ar$*` overrides, and `--padding`. |
 | **IEEE MAC registries** | `mac_vendor_registry.rs`, `tools/mac-vendor-updater/` | Longest-prefix MA-L / MA-M / MA-S / IAB lookup from `ieee-oui.txt`. The updater fetches official CSVs with system `curl`, converts them, and atomically writes the mapping file. The scan crate never downloads. |
-| **Portable link layer** | `link_layer_backend.rs`, `scanner.rs` | The `LinkLayerEndpoint` trait and shared interface/address value types; the backend-generic scan engine (target iteration, send/receive scheduling, merge duplicate replies, warnings). |
+| **Portable link layer** | `link_layer_backend.rs`, `scanner.rs`, `scan_timing.rs` | The `LinkLayerEndpoint` trait and shared interface/address value types; the backend-generic scan engine (target iteration, burst or strict inter-target scheduling, per-round receive on the rate-limited path, merge duplicate replies, warnings); checked bandwidth and backoff arithmetic with an injectable monotonic clock. |
 | **Linux backend** | `linux_scanner.rs`, `linux_interface_discovery.rs`, `linux_socket.rs`, `linux_system_call.rs`, `linux_packet.rs` | `AF_PACKET` raw socket, `ioctl`/`if_nameindex` discovery, `sockaddr_ll`, and the Linux scan entry points. |
 | **macOS backend** | `macos_scanner.rs`, `macos_interface_discovery.rs`, `macos_bpf_socket.rs`, `macos_system_call.rs`, `macos_packet.rs` | Berkeley Packet Filter device (`/dev/bpf*`), `getifaddrs(3)` discovery, BPF ioctls/filter, and the macOS scan entry points. |
 
@@ -59,8 +59,12 @@ CLI / library caller
        │
        ▼
   scanner (shared, backend-generic):
-       ├──► For each round: build ARP request frames (optional 802.1Q/802.1ad TCIs, LLC/SNAP, dest/src MAC, ar$* overrides, --padding) → endpoint.send
-       │
+       ├──► Default: for each round, send every target immediately, sleep --pacing-ms between rounds,
+       │    then one receive window of --timeout-ms
+       ├──► Rate-limited (--bandwidth or --interval-ms): send still-unanswered targets with a strict
+       │    minimum gap from the previous send completion (no catch-up), receive after that round for
+       │    timeout * backoff^(round-1), drop answered targets, then wait until both the inter-send
+       │    deadline and the receive window have passed before adding --pacing-ms
        └──► Receive loop (wait_until_readable + try_receive): parse Ethernet II + ARP;
             record opcode 2 replies; ignore well-formed non-reply ARP; warn on malformed frames
                  │

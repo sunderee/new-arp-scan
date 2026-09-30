@@ -331,3 +331,53 @@ fn binary_exits_with_usage_error_code_when_service_vlan_flags_lack_prerequisites
         );
     }
 }
+
+#[test]
+fn binary_exits_with_usage_error_code_for_invalid_rate_limit_flags() {
+    // Arrange
+    let binary_path = new_arp_scan_binary_path();
+    assert!(
+        binary_path.is_file(),
+        "expected binary at {}, set CARGO_BIN_EXE or run `cargo test` from the crate root",
+        binary_path.display()
+    );
+    let cases: [(&str, &[&str], &str); 5] = [
+        (
+            "bandwidth and interval together",
+            &["scan", "--bandwidth", "256K", "--interval-ms", "2"],
+            "interval",
+        ),
+        ("zero bandwidth", &["scan", "--bandwidth", "0"], "bandwidth"),
+        (
+            "bandwidth suffix overflow",
+            &["scan", "--bandwidth", "18446744073709551615K"],
+            "does not fit",
+        ),
+        (
+            "backoff without a rate",
+            &["scan", "--backoff", "1.5"],
+            "backoff",
+        ),
+        ("zero interval", &["scan", "--interval-ms", "0"], "interval"),
+    ];
+
+    for (name, arguments, stderr_fragment) in cases {
+        // Act
+        let output = std::process::Command::new(&binary_path)
+            .args(arguments)
+            .output()
+            .expect("spawning scan with an invalid rate limit should succeed");
+
+        // Assert
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{name} should map to usage exit code 2, stderr: {stderr}"
+        );
+        assert!(
+            stderr.to_lowercase().contains(stderr_fragment),
+            "{name} should mention {stderr_fragment}, stderr: {stderr}"
+        );
+    }
+}

@@ -158,6 +158,35 @@ pub enum AppError {
         /// Service VLAN identifier that had no customer tag to wrap.
         service_vlan_identifier: u16,
     },
+    /// `--bandwidth` was zero. Suffix overflow is rejected by the command-line parser before this
+    /// variant is constructed.
+    InterTargetBandwidthRejected,
+    /// An explicit inter-target interval was zero.
+    InterTargetIntervalRejected,
+    /// A retry backoff factor was non-finite or less than one.
+    RetryBackoffFactorRejected,
+    /// A checked scan duration or monotonic deadline does not fit in its representation.
+    ScanTimingExceedsLimit {
+        /// Which computed span overflowed.
+        limit: ScanTimingLimit,
+    },
+}
+
+/// A scan-timing span that could not be represented without overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScanTimingLimit {
+    /// The interval derived from `--bandwidth` and the on-wire frame size does not fit in
+    /// [`std::time::Duration`].
+    BandwidthInterval,
+    /// The strict inter-send interval plus inter-round `--pacing-ms` does not fit in
+    /// [`std::time::Duration`].
+    InterRoundGap,
+    /// `timeout * backoff^round` for a planned retry round does not fit in [`std::time::Duration`].
+    RetryReceiveWindow,
+    /// Adding a duration to the monotonic clock would overflow [`std::time::Instant`] or the test
+    /// clock.
+    MonotonicDeadline,
 }
 
 fn try_write_early_app_error_variants(
@@ -225,10 +254,38 @@ fn try_write_early_app_error_variants(
     })
 }
 
+fn write_rate_limit_app_error(
+    application_error: &AppError,
+    formatter: &mut std::fmt::Formatter<'_>,
+) -> Option<std::fmt::Result> {
+    Some(match application_error {
+        AppError::InterTargetBandwidthRejected => {
+            write!(
+                formatter,
+                "inter-target bandwidth must be greater than zero"
+            )
+        }
+        AppError::InterTargetIntervalRejected => {
+            write!(formatter, "inter-target interval must be greater than zero")
+        }
+        AppError::RetryBackoffFactorRejected => write!(
+            formatter,
+            "retry backoff factor must be finite and at least 1"
+        ),
+        AppError::ScanTimingExceedsLimit { limit } => {
+            write!(formatter, "{}", scan_timing_limit_display_message(*limit))
+        }
+        _ => return None,
+    })
+}
+
 fn write_late_app_error_variants(
     application_error: &AppError,
     formatter: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result {
+    if let Some(result) = write_rate_limit_app_error(application_error, formatter) {
+        return result;
+    }
     match application_error {
         AppError::InterfaceIpv4AddressQueryFailed {
             interface_name,
@@ -319,6 +376,19 @@ fn write_late_app_error_variants(
             formatter,
             "unexpected application error variant during display formatting"
         ),
+    }
+}
+
+fn scan_timing_limit_display_message(limit: ScanTimingLimit) -> &'static str {
+    match limit {
+        ScanTimingLimit::BandwidthInterval => {
+            "outbound send interval derived from --bandwidth does not fit in a duration"
+        }
+        ScanTimingLimit::InterRoundGap => {
+            "inter-round gap of the send interval plus --pacing-ms does not fit in a duration"
+        }
+        ScanTimingLimit::RetryReceiveWindow => "retry receive window does not fit in a duration",
+        ScanTimingLimit::MonotonicDeadline => "scan deadline does not fit in the monotonic clock",
     }
 }
 
@@ -1204,6 +1274,61 @@ mod tests {
                 && displayed.contains("1500")
                 && displayed.contains("padding"),
             "display should name the oversize payload and --padding, got: {displayed}"
+        );
+    }
+
+    #[test]
+    fn display_names_rejected_inter_target_rate_inputs() {
+        // Arrange
+        let bandwidth = AppError::InterTargetBandwidthRejected;
+        let interval = AppError::InterTargetIntervalRejected;
+        let backoff = AppError::RetryBackoffFactorRejected;
+
+        // Act
+        let bandwidth_display = bandwidth.to_string();
+        let interval_display = interval.to_string();
+        let backoff_display = backoff.to_string();
+
+        // Assert
+        assert!(
+            bandwidth_display.contains("bandwidth") && bandwidth_display.contains("zero"),
+            "zero bandwidth should be named, got: {bandwidth_display}"
+        );
+        assert!(
+            interval_display.contains("interval") && interval_display.contains("zero"),
+            "zero interval should be named, got: {interval_display}"
+        );
+        assert!(
+            backoff_display.contains("backoff") && backoff_display.contains('1'),
+            "invalid backoff should be named, got: {backoff_display}"
+        );
+        assert!(bandwidth.source().is_none());
+    }
+
+    #[test]
+    fn display_names_each_scan_timing_overflow() {
+        // Arrange
+        let limits = [
+            super::ScanTimingLimit::BandwidthInterval,
+            super::ScanTimingLimit::InterRoundGap,
+            super::ScanTimingLimit::RetryReceiveWindow,
+            super::ScanTimingLimit::MonotonicDeadline,
+        ];
+
+        // Act
+        let displayed: Vec<String> = limits
+            .into_iter()
+            .map(|limit| AppError::ScanTimingExceedsLimit { limit }.to_string())
+            .collect();
+
+        // Assert
+        assert!(
+            displayed.iter().all(|message| !message.is_empty())
+                && displayed[0].contains("bandwidth")
+                && displayed[1].contains("pacing")
+                && displayed[2].contains("retry")
+                && displayed[3].contains("deadline"),
+            "each timing overflow should name its span, got: {displayed:?}"
         );
     }
 }

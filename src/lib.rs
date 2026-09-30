@@ -13,6 +13,7 @@ mod interface_validation;
 mod ipv4_cidr;
 mod ipv4_subnet;
 mod link_layer_backend;
+mod scan_timing;
 mod scanner;
 
 #[cfg(test)]
@@ -47,8 +48,9 @@ pub use address_resolution_protocol::{
     try_parse_address_resolution_reply_ipv4_over_ethernet,
 };
 pub use application_command::{
-    ApplicationCommand, ArpSenderProtocolAddress, DEFAULT_SCAN_ATTEMPTS, DEFAULT_SCAN_PACING,
-    DEFAULT_SCAN_TIMEOUT, ScanWireOptions,
+    ApplicationCommand, ArpSenderProtocolAddress, DEFAULT_RETRY_BACKOFF_FACTOR,
+    DEFAULT_SCAN_ATTEMPTS, DEFAULT_SCAN_PACING, DEFAULT_SCAN_TIMEOUT, InterTargetSendRate,
+    PositiveDuration, RateLimitedScanTiming, RetryBackoffFactor, ScanWireOptions,
 };
 pub use application_outcome::ApplicationOutcome;
 pub use application_outcome::DiscoveredHost;
@@ -57,6 +59,7 @@ pub use application_outcome::ScanTimingSummary;
 pub use application_outcome::UsableInterfaceListingRow;
 pub use application_outcome::UsableInterfacesListOutcome;
 pub use error::AppError;
+pub use error::ScanTimingLimit;
 pub use ethernet_frame::{
     Ieee8021qPriorityCodePoint, Ieee8021qTagControlInformation, Ieee8021qVlanIdentifier,
 };
@@ -79,7 +82,9 @@ pub use linux_scanner::perform_arp_probe;
 /// sends requests only for that address (which must be strictly interior on the subnet) and
 /// records replies only from that sender IPv4. The `timeout` field bounds the global receive
 /// window after the last request is sent; the `pacing` field sleeps after each full round of target
-/// sends except the last round; the `attempts` field is how many such rounds run. The `wire` field
+/// sends except the last round; the `attempts` field is how many such rounds run. `rate_limit`
+/// opts into strict inter-target spacing and per-round retry backoff; when it is [`None`], each
+/// round still bursts every target. The `wire` field
 /// selects IEEE 802.1Q tagging, RFC 826 `ar$spa` (including RFC 5227 Probe/Announcement),
 /// Ethernet `--destaddr`/`--srcaddr`, remaining RFC 826 `ar$*` fields, RFC 1042 LLC/SNAP
 /// framing, IEEE 802.1Q PCP/DEI, and custom `--padding`. When the scan
@@ -112,6 +117,7 @@ pub use linux_scanner::perform_arp_probe;
 ///     timeout: DEFAULT_SCAN_TIMEOUT,
 ///     pacing: DEFAULT_SCAN_PACING,
 ///     attempts: DEFAULT_SCAN_ATTEMPTS,
+///     rate_limit: None,
 ///     wire: ScanWireOptions::default(),
 /// });
 ///
@@ -136,6 +142,7 @@ pub fn run(command: ApplicationCommand) -> Result<ApplicationOutcome, AppError> 
             timeout,
             pacing,
             attempts,
+            rate_limit,
             wire,
         } => run_address_resolution_scan(
             interface_name.as_deref(),
@@ -144,6 +151,7 @@ pub fn run(command: ApplicationCommand) -> Result<ApplicationOutcome, AppError> 
             pacing,
             attempts,
             wire,
+            rate_limit,
         ),
         ApplicationCommand::UsableInterfacesList => {
             #[cfg(target_os = "linux")]
@@ -177,9 +185,11 @@ fn run_address_resolution_scan(
     pacing: std::time::Duration,
     attempts: std::num::NonZeroU64,
     wire: ScanWireOptions,
+    rate_limit: Option<crate::application_command::RateLimitedScanTiming>,
 ) -> Result<ApplicationOutcome, AppError> {
     wire.validate_ieee_8021q_tag_stack()?;
     wire.validate_ieee_8023_mac_client_data()?;
+    scan_timing::validate_scan_timing_before_socket(timeout, pacing, attempts, &wire, rate_limit)?;
     if let Some(interface_name) = interface_name {
         interface_validation::validate_interface_name_for_linux_packet_socket(interface_name)?;
     }
@@ -197,6 +207,7 @@ fn run_address_resolution_scan(
                 pacing,
                 attempts,
                 wire,
+                rate_limit,
             )?,
             None => linux_scanner::perform_arp_scan(
                 &resolved_interface_name,
@@ -204,6 +215,7 @@ fn run_address_resolution_scan(
                 pacing,
                 attempts,
                 wire,
+                rate_limit,
             )?,
         };
         let scan_outcome = scan_outcome.with_scan_timing_summary(
@@ -227,6 +239,7 @@ fn run_address_resolution_scan(
                 pacing,
                 attempts,
                 wire,
+                rate_limit,
             )?,
             None => macos_scanner::perform_arp_scan(
                 &resolved_interface_name,
@@ -234,6 +247,7 @@ fn run_address_resolution_scan(
                 pacing,
                 attempts,
                 wire,
+                rate_limit,
             )?,
         };
         let scan_outcome = scan_outcome.with_scan_timing_summary(
@@ -248,7 +262,14 @@ fn run_address_resolution_scan(
     {
         // No raw link-layer backend on this operating system; the timing and target
         // parameters are intentionally unused on the unsupported path.
-        let _ = (&target_ipv4_address, &timeout, &pacing, &attempts, &wire);
+        let _ = (
+            &target_ipv4_address,
+            &timeout,
+            &pacing,
+            &attempts,
+            &wire,
+            &rate_limit,
+        );
         Err(AppError::UnsupportedPlatform {
             operating_system: std::env::consts::OS.to_string(),
         })
@@ -284,8 +305,47 @@ mod tests {
     use super::DEFAULT_SCAN_ATTEMPTS;
     use super::DEFAULT_SCAN_PACING;
     use super::DEFAULT_SCAN_TIMEOUT;
+    use super::InterTargetSendRate;
+    use super::PositiveDuration;
+    use super::RateLimitedScanTiming;
+    use super::RetryBackoffFactor;
+    use super::ScanTimingLimit;
     use super::ScanWireOptions;
     use super::run;
+
+    #[test]
+    fn rejects_an_unrepresentable_retry_window_before_interface_discovery() {
+        // Arrange
+        let command = ApplicationCommand::Scan {
+            interface_name: Some("lo".to_string()),
+            target_ipv4_address: None,
+            timeout: std::time::Duration::from_secs(3),
+            pacing: DEFAULT_SCAN_PACING,
+            attempts: std::num::NonZeroU64::new(10_000).expect("ten thousand rounds"),
+            rate_limit: Some(RateLimitedScanTiming::new(
+                InterTargetSendRate::Interval(
+                    PositiveDuration::new(std::time::Duration::from_millis(1))
+                        .expect("one millisecond is positive"),
+                ),
+                RetryBackoffFactor::new(1.5).expect("1.5 is a valid backoff"),
+            )),
+            wire: ScanWireOptions::default(),
+        };
+
+        // Act
+        let outcome = run(command);
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::ScanTimingExceedsLimit {
+                    limit: ScanTimingLimit::RetryReceiveWindow
+                })
+            ),
+            "overflowing backoff must fail before interface discovery or a raw socket, got: {outcome:?}"
+        );
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[test]
@@ -299,6 +359,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -322,6 +383,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -345,6 +407,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -368,6 +431,7 @@ mod tests {
             timeout: std::time::Duration::from_mins(1),
             pacing: std::time::Duration::from_millis(999),
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -393,6 +457,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -451,6 +516,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -474,6 +540,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -500,6 +567,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -524,6 +592,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -547,6 +616,7 @@ mod tests {
             timeout: std::time::Duration::from_millis(1),
             pacing: std::time::Duration::from_millis(5),
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -572,6 +642,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: NonZeroU64::new(99).expect("ninety-nine is non-zero"),
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -629,6 +700,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -669,6 +741,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -695,6 +768,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -732,6 +806,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 
@@ -768,6 +843,7 @@ mod tests {
             timeout: DEFAULT_SCAN_TIMEOUT,
             pacing: DEFAULT_SCAN_PACING,
             attempts: DEFAULT_SCAN_ATTEMPTS,
+            rate_limit: None,
             wire: ScanWireOptions::default(),
         };
 

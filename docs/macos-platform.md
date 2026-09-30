@@ -16,7 +16,7 @@ macOS has no `AF_PACKET`. To send and receive raw **Ethernet II frames** carryin
 - The filter deliberately admits **only** the tag arrangements the shared parser accepts: it follows a service tag to its customer tag and no further. A lone `0x88A8` tag, two stacked `0x8100` tags, a third tag, and the unofficial TPIDs `0x9100` / `0x9200` / `0x9300` are dropped in the kernel rather than parsed and rejected in userspace.
 - Enable **`BIOCIMMEDIATE`** for prompt delivery and **`BIOCSHDRCMPLT`** so the source hardware address written by the encoder is preserved.
 
-Interface enumeration uses **`getifaddrs(3)`** (rather than Linux `ioctl`), aggregating the `AF_INET` address/netmask and the `AF_LINK` Ethernet address per interface. The pure ARP/Ethernet framing and the scan scheduling are shared with Linux through the portable link-layer backend (see [architecture](./architecture.md) and `DECISIONS.md`, 2026-06-03).
+Interface enumeration uses **`getifaddrs(3)`** (rather than Linux `ioctl`), aggregating the `AF_INET` address/netmask and the `AF_LINK` Ethernet address per interface. The pure ARP/Ethernet framing and the scan scheduling are shared with Linux through the portable link-layer backend (see [architecture](./architecture.md) and `DECISIONS.md`, 2026-06-03). `--bandwidth`, `--interval-ms`, and `--backoff` use that shared scheduler and do not change the BPF device; `--pacing-ms` remains extra delay between rounds only.
 
 ---
 

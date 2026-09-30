@@ -8,7 +8,8 @@ use clap::Parser;
 use new_arp_scan::Ieee8021qPriorityCodePoint;
 use new_arp_scan::Ieee8021qVlanIdentifier;
 use new_arp_scan::application_command::{
-    ApplicationCommand, ArpSenderProtocolAddress, EthernetPaddingOctets, ScanWireOptions,
+    ApplicationCommand, ArpSenderProtocolAddress, EthernetPaddingOctets, InterTargetSendRate,
+    PositiveDuration, RateLimitedScanTiming, RetryBackoffFactor, ScanWireOptions,
 };
 use new_arp_scan::cli::{CliRoot, CliSubcommand, ScanArguments};
 use new_arp_scan::mac_vendor_registry::MacVendorRegistry;
@@ -35,14 +36,16 @@ fn main() {
                         }
                     };
                 let wire = scan_wire_options_from_arguments(&scan);
+                let rate_limit = rate_limit_from_scan_arguments(&scan);
                 match new_arp_scan::run(ApplicationCommand::Scan {
                     interface_name: scan.interface_name,
                     target_ipv4_address: scan.host_ipv4_address,
                     timeout: Duration::from_millis(scan.timeout_milliseconds),
                     pacing: Duration::from_millis(scan.pacing_milliseconds),
                     attempts: std::num::NonZeroU64::new(scan.attempts).expect(
-                        "clap should reject zero attempts before reaching the application run path",
+                        "INVARIANT: clap rejects a zero --attempts before the application run path",
                     ),
+                    rate_limit,
                     wire,
                 }) {
                     Ok(outcome) => {
@@ -90,6 +93,23 @@ fn main() {
         },
         Err(error) => error.exit(),
     }
+}
+
+fn rate_limit_from_scan_arguments(scan: &ScanArguments) -> Option<RateLimitedScanTiming> {
+    let send_rate = if let Some(bits_per_second) = scan.bandwidth_bits_per_second {
+        InterTargetSendRate::Bandwidth(bits_per_second)
+    } else {
+        let milliseconds = scan.interval_milliseconds?;
+        InterTargetSendRate::Interval(
+            PositiveDuration::new(Duration::from_millis(milliseconds)).expect(
+                "INVARIANT: clap rejects a zero --interval-ms before the application run path",
+            ),
+        )
+    };
+    let backoff_factor = scan
+        .retry_backoff_factor
+        .unwrap_or(RetryBackoffFactor::DEFAULT);
+    Some(RateLimitedScanTiming::new(send_rate, backoff_factor))
 }
 
 fn scan_wire_options_from_arguments(scan: &ScanArguments) -> ScanWireOptions {
@@ -178,6 +198,8 @@ fn load_mac_vendor_registry(
 #[cfg(test)]
 mod tests {
     use super::load_mac_vendor_registry;
+    use super::rate_limit_from_scan_arguments;
+    use clap::Parser;
     use new_arp_scan::mac_address::MacAddress;
     use new_arp_scan::mac_vendor_registry::DEFAULT_MAC_VENDOR_FILE_NAME;
     use std::fs;
@@ -220,6 +242,63 @@ mod tests {
             previous,
             directory,
             _lock: lock,
+        }
+    }
+
+    #[test]
+    fn rate_limit_mapping_uses_the_default_backoff_only_when_a_rate_is_set() {
+        // Arrange
+        let bandwidth = new_arp_scan::cli::CliRoot::try_parse_from([
+            "new-arp-scan",
+            "scan",
+            "--bandwidth",
+            "256K",
+        ])
+        .expect("256K parses");
+        let interval = new_arp_scan::cli::CliRoot::try_parse_from([
+            "new-arp-scan",
+            "scan",
+            "--interval-ms",
+            "2",
+            "--backoff",
+            "2",
+        ])
+        .expect("interval and backoff parse");
+        let burst = new_arp_scan::cli::CliRoot::try_parse_from(["new-arp-scan", "scan"])
+            .expect("a scan without a rate parses");
+
+        // Act
+        let bandwidth_limit = rate_limit_from_scan_arguments(scan_arguments(&bandwidth));
+        let interval_limit = rate_limit_from_scan_arguments(scan_arguments(&interval));
+        let absent = rate_limit_from_scan_arguments(scan_arguments(&burst));
+
+        // Assert
+        let bandwidth_limit = bandwidth_limit.expect("bandwidth opts into rate limiting");
+        assert!(matches!(
+            bandwidth_limit.send_rate(),
+            new_arp_scan::InterTargetSendRate::Bandwidth(bits) if bits.get() == 256_000
+        ));
+        assert_eq!(
+            bandwidth_limit.backoff_factor().as_f64().to_bits(),
+            1.5_f64.to_bits(),
+            "an omitted --backoff uses 1.5 only on the rate-limited path"
+        );
+        let interval_limit = interval_limit.expect("interval opts into rate limiting");
+        assert!(matches!(
+            interval_limit.send_rate(),
+            new_arp_scan::InterTargetSendRate::Interval(interval) if interval.as_duration() == std::time::Duration::from_millis(2)
+        ));
+        assert_eq!(
+            interval_limit.backoff_factor().as_f64().to_bits(),
+            2.0_f64.to_bits()
+        );
+        assert!(absent.is_none());
+    }
+
+    fn scan_arguments(parsed: &new_arp_scan::cli::CliRoot) -> &new_arp_scan::cli::ScanArguments {
+        match parsed.subcommand.as_ref() {
+            Some(new_arp_scan::cli::CliSubcommand::Scan(scan)) => scan,
+            other => panic!("expected the scan subcommand, got: {other:?}"),
         }
     }
 
