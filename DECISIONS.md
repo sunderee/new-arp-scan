@@ -262,3 +262,17 @@ Resolved fields are encoded through [`AddressResolutionRequestLayout`](src/addre
 **Reason:** A default `/24` is one socket-speed burst. Operators need an original-arp-scan-style outbound ceiling without giving up the existing burst path or turning `--pacing-ms` into per-target delay.
 
 **Consequences:** Library callers of `ApplicationCommand::Scan` and `perform_arp_probe` must be updated for `0.3.0`. Congestion control, `--interval` microsecond suffixes, and the original cumulative catch-up scheduler stay out of scope.
+
+## 2026-09-30 — Passive ARP monitor
+
+**Decision:** Add a finite, receive-only `monitor` command for GitHub issue #80. It is a new subcommand. `scan` is unchanged, including the rule that well-formed non-reply ARP is ignored and is not a malformed warning. The crate version moves from `0.3.0` to `0.4.0` because [`ApplicationCommand`](src/application_command.rs) and [`ApplicationOutcome`](src/application_outcome.rs) gain variants. Both enums are `#[non_exhaustive]`. No new dependency, and no libpcap.
+
+- **Listen only.** The command emits no requests, probes, announcements, or address, DHCP, or routing changes. It never calls `send_ethernet_frame`.
+- **Scope.** Same interface selection and privileges as `scan`. Every IPv4 address configured on the selected interface name is a local address. Alias names such as `eth0:1` stay separate. The default window is 30 seconds. Zero is rejected. Indefinite and signal-interrupted listens are deferred.
+- **Classification.** A request or reply whose sender protocol address is local and whose sender hardware address is not the interface MAC is a `conflict`. Frames with both the local MAC and a local IPv4 address are suppressed. Other well-formed ARP is `observed`. A nonzero, nonlocal sender protocol address claimed by two or more hardware addresses is a separate `duplicate-ip` record. Reserved opcodes 0 and 65535 stay malformed warnings. This is diagnostic reporting, not RFC 5227 address conflict detection: there is no defense, abandonment, or `DEFEND_INTERVAL` announcement. ARP is unauthenticated, so reports can be forged.
+- **Delivery.** One bounded outcome after the window. Repeated packet identities use a saturating count. At most 4,096 distinct packet records are kept, with one truncation warning. Packets dropped by that limit do not create or extend duplicate claims. Output is human-readable. There is no vendor lookup, timestamp, or JSON. The public report types are `#[non_exhaustive]`.
+- **Capture.** Linux monitor sockets bind `ETH_P_ALL` so the existing Ethernet II, single-customer-tag, service-plus-customer-tag, and RFC 1042 SNAP parsers can see frames. The kernel still strips the outermost VLAN tag; the command does not request `PACKET_AUXDATA`. macOS reuses the existing BPF opener, which already hides sent frames. Unrelated Ethernet is ignored in userspace. A checked monotonic deadline is re-read before every receive so a busy capture cannot run past the timeout.
+
+**Reason:** Operators need to see a foreign station claiming one of this host's IPv4 addresses without turning that into a scan result or into a full address-conflict-detection implementation.
+
+**Consequences:** External matches on `ApplicationCommand` and `ApplicationOutcome` need a wildcard. Privileged live listens stay manual and are not part of CI. `scan` request-ignore behavior remains as decided on 2026-08-15.

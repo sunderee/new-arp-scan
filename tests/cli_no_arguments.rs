@@ -48,7 +48,10 @@ fn binary_prints_help_and_exits_successfully_when_invoked_with_no_arguments() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("scan") && stdout.contains("interface") && stdout.contains("interfaces"),
-        "help output should describe scan, interfaces, and interface flag, got stdout: {stdout}"
+        stdout.contains("scan")
+            && stdout.contains("monitor")
+            && stdout.contains("interface")
+            && stdout.contains("interfaces"),
+        "help output should describe scan, monitor, interfaces, and interface flag, got stdout: {stdout}"
     );
 }

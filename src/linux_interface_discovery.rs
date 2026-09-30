@@ -6,7 +6,9 @@ use std::os::fd::OwnedFd;
 
 use crate::error::AppError;
 use crate::interface_validation;
-use crate::link_layer_backend::{ArpScanInterfaceCandidate, InterfaceScanAddresses};
+use crate::link_layer_backend::{
+    ArpScanInterfaceCandidate, InterfaceScanAddresses, MonitorInterfaceIdentity,
+};
 use crate::linux_packet::{INTERFACE_FLAG_LOOPBACK, INTERFACE_FLAG_NO_ARP, INTERFACE_FLAG_UP};
 use crate::linux_socket::validated_interface_index_for_arp_scanning;
 use crate::linux_system_call;
@@ -304,6 +306,55 @@ pub fn discover_interface_scan_addresses(
     })
 }
 
+/// Reads every IPv4 address configured on `interface_name`, plus its Ethernet address.
+///
+/// The primary address from `SIOCGIFADDR` is always included. Additional addresses come from
+/// `getifaddrs(3)` entries whose `ifa_name` equals `interface_name`. Alias interface names such as
+/// `eth0:1` are separate kernel names and are not included. Scan discovery continues to use only
+/// [`discover_interface_scan_addresses`].
+///
+/// # Errors
+///
+/// Returns [`AppError`] when the name is invalid, the interface is loopback, down, or `NOARP`, an
+/// `ioctl` or `getifaddrs(3)` call fails, or the hardware address is not Ethernet.
+///
+/// # Panics
+///
+/// This function does not panic.
+pub fn discover_monitor_interface_identity(
+    interface_name: &str,
+) -> Result<MonitorInterfaceIdentity, AppError> {
+    interface_validation::validate_interface_name_for_linux_packet_socket(interface_name)?;
+    validated_interface_index_for_arp_scanning(interface_name)?;
+    let primary = discover_interface_scan_addresses(interface_name)?;
+    let records = linux_system_call::list_interface_ipv4_addresses()
+        .map_err(|source| AppError::InterfaceEnumerationFailed { source })?;
+    let identity = MonitorInterfaceIdentity::from_addresses(
+        configured_ipv4_addresses(interface_name, primary.source_ipv4_address, &records),
+        primary.source_mac_address,
+    );
+    if identity.ipv4_addresses.is_empty() {
+        return Err(AppError::InterfaceRejectedForScanning {
+            interface_name: interface_name.to_string(),
+            reason: "interface has no IPv4 address".to_string(),
+        });
+    }
+    Ok(identity)
+}
+
+/// Unions `primary_ipv4_address` with every `getifaddrs(3)` address for `interface_name`.
+fn configured_ipv4_addresses(
+    interface_name: &str,
+    primary_ipv4_address: Ipv4Addr,
+    records: &[linux_system_call::InterfaceIpv4AddressRecord],
+) -> Vec<Ipv4Addr> {
+    std::iter::once(primary_ipv4_address)
+        .chain(records.iter().filter_map(|record| {
+            (record.interface_name == interface_name).then_some(record.ipv4_address)
+        }))
+        .collect()
+}
+
 /// Returns `true` when `flags` indicate an interface that is administratively up, not loopback, and
 /// does not have `NOARP` set.
 ///
@@ -322,6 +373,8 @@ fn interface_flags_allow_arp_scanning(flags: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::configured_ipv4_addresses;
+    use super::discover_monitor_interface_identity;
     use super::enumerate_usable_arp_scan_interface_candidates;
     use super::interface_flags_allow_arp_scanning;
     use super::read_hardware_address_from_sockaddr;
@@ -329,6 +382,7 @@ mod tests {
     use super::resolve_scan_interface_name;
     use crate::error::AppError;
     use crate::linux_packet::{INTERFACE_FLAG_LOOPBACK, INTERFACE_FLAG_NO_ARP, INTERFACE_FLAG_UP};
+    use crate::linux_system_call::InterfaceIpv4AddressRecord;
     use crate::mac_address::MacAddress;
     use std::mem::zeroed;
     use std::net::Ipv4Addr;
@@ -591,5 +645,111 @@ mod tests {
             matches!(outcome, Err(AppError::InterfaceLookupFailed { .. })),
             "unknown interface should fail lookup after name validation, got: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn configured_ipv4_addresses_unions_primary_with_same_name_records_only() {
+        // Arrange
+        let primary = Ipv4Addr::new(192, 168, 1, 10);
+        let secondary = Ipv4Addr::new(192, 168, 1, 11);
+        let records = [
+            InterfaceIpv4AddressRecord {
+                interface_name: "eth0".to_string(),
+                ipv4_address: secondary,
+            },
+            InterfaceIpv4AddressRecord {
+                interface_name: "eth0".to_string(),
+                ipv4_address: primary,
+            },
+            InterfaceIpv4AddressRecord {
+                interface_name: "eth0:1".to_string(),
+                ipv4_address: Ipv4Addr::new(10, 0, 0, 8),
+            },
+            InterfaceIpv4AddressRecord {
+                interface_name: "eth1".to_string(),
+                ipv4_address: Ipv4Addr::BROADCAST,
+            },
+        ];
+
+        // Act
+        let addresses = configured_ipv4_addresses("eth0", primary, &records);
+
+        // Assert
+        assert_eq!(
+            addresses,
+            vec![primary, secondary, primary],
+            "alias and other interface names must stay out of the selected interface"
+        );
+    }
+
+    #[test]
+    fn configured_ipv4_addresses_keeps_primary_when_getifaddrs_has_no_match() {
+        // Arrange
+        let primary = Ipv4Addr::UNSPECIFIED;
+        let records = [InterfaceIpv4AddressRecord {
+            interface_name: "eth1".to_string(),
+            ipv4_address: Ipv4Addr::LOCALHOST,
+        }];
+
+        // Act
+        let addresses = configured_ipv4_addresses("eth0", primary, &records);
+
+        // Assert
+        assert_eq!(
+            addresses,
+            vec![primary],
+            "the ioctl primary address remains even when getifaddrs omits the name"
+        );
+    }
+
+    #[test]
+    fn discover_monitor_interface_identity_rejects_loopback_before_address_merge() {
+        // Act
+        let outcome = discover_monitor_interface_identity("lo");
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(AppError::InterfaceRejectedForScanning { .. })),
+            "loopback must be rejected for monitoring, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn discover_monitor_interface_identity_rejects_unknown_interface() {
+        // Act
+        let outcome = discover_monitor_interface_identity("narp_none____");
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(AppError::InterfaceLookupFailed { .. })),
+            "an unknown interface must fail before getifaddrs merge, got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn discover_monitor_interface_identity_includes_primary_when_usable() {
+        // Arrange
+        let candidates = enumerate_usable_arp_scan_interface_candidates()
+            .expect("enumeration should succeed on Linux test hosts");
+        let Some(candidate) = candidates.first() else {
+            return;
+        };
+
+        // Act
+        let identity = discover_monitor_interface_identity(&candidate.interface_name)
+            .expect("a usable scan interface should have a monitor identity");
+
+        // Assert
+        assert!(
+            identity
+                .ipv4_addresses
+                .contains(&candidate.source_ipv4_address),
+            "the scan primary address must be part of the monitor set, got: {identity:?}"
+        );
+        assert_eq!(identity.source_mac_address, candidate.source_mac_address);
+        let mut sorted = identity.ipv4_addresses.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(identity.ipv4_addresses, sorted);
     }
 }

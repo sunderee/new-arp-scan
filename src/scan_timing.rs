@@ -669,6 +669,17 @@ mod fake_clock {
         pub(crate) fn unreadable_waits(&self) -> Vec<Duration> {
             self.unreadable_waits.borrow().clone()
         }
+
+        /// Moves the clock forward by `duration` without recording a sleep.
+        pub(crate) fn advance(&self, duration: Duration) {
+            self.now_ns
+                .set(self.now_ns.get().saturating_add(duration.as_nanos()));
+        }
+
+        /// Sets the clock to an absolute nanosecond count.
+        pub(crate) fn set_nanos(&self, nanos: u128) {
+            self.now_ns.set(nanos);
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

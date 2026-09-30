@@ -12,7 +12,9 @@ use std::net::Ipv4Addr;
 
 use crate::error::AppError;
 use crate::interface_validation;
-use crate::link_layer_backend::{ArpScanInterfaceCandidate, InterfaceScanAddresses};
+use crate::link_layer_backend::{
+    ArpScanInterfaceCandidate, InterfaceScanAddresses, MonitorInterfaceIdentity,
+};
 use crate::mac_address::MacAddress;
 use crate::macos_packet::{
     INTERFACE_FLAG_LOOPBACK, INTERFACE_FLAG_NO_ARP, INTERFACE_FLAG_UP, INTERFACE_TYPE_ETHERNET,
@@ -48,6 +50,7 @@ struct InterfaceAccumulator {
     interface_flags: libc::c_uint,
     source_ipv4_address: Option<Ipv4Addr>,
     ipv4_netmask: Option<Ipv4Addr>,
+    ipv4_addresses: Vec<Ipv4Addr>,
     link_layer: Option<(u8, [u8; 6])>,
 }
 
@@ -75,6 +78,7 @@ fn accumulate_interface_records(
 
         match &record.payload {
             InterfaceAddressPayload::Ipv4 { address, netmask } => {
+                accumulator.ipv4_addresses.push(*address);
                 if accumulator.source_ipv4_address.is_none() {
                     accumulator.source_ipv4_address = Some(*address);
                     accumulator.ipv4_netmask = *netmask;
@@ -250,6 +254,64 @@ pub fn discover_interface_scan_addresses(
     })
 }
 
+/// Builds a monitor identity from already-collected `getifaddrs(3)` records.
+///
+/// Scan classification still keeps only the first IPv4 address. This function keeps every `AF_INET`
+/// address on `interface_name` after the same usability checks.
+fn monitor_identity_from_records(
+    records: &[InterfaceAddressRecord],
+    interface_name: &str,
+) -> Result<MonitorInterfaceIdentity, AppError> {
+    let accumulated = accumulate_interface_records(records);
+    let Some(accumulator) = accumulated.get(interface_name) else {
+        return Err(AppError::InterfaceLookupFailed {
+            interface_name: interface_name.to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "interface not present in getifaddrs output",
+            ),
+        });
+    };
+    let classified = classify_accumulator(interface_name, accumulator)?;
+    let identity = MonitorInterfaceIdentity::from_addresses(
+        accumulator
+            .ipv4_addresses
+            .iter()
+            .copied()
+            .chain(std::iter::once(classified.source_ipv4_address)),
+        classified.source_mac_address,
+    );
+    if identity.ipv4_addresses.is_empty() {
+        return Err(AppError::InterfaceRejectedForScanning {
+            interface_name: interface_name.to_string(),
+            reason: "interface has no IPv4 address".to_string(),
+        });
+    }
+    Ok(identity)
+}
+
+/// Reads every IPv4 address configured on `interface_name`, plus its Ethernet address.
+///
+/// # Errors
+///
+/// Returns [`AppError::InvalidInterfaceName`] for an unusable name, [`AppError::InterfaceLookupFailed`]
+/// when the interface is not present, [`AppError::InterfaceRejectedForScanning`] when it is loopback,
+/// down, `NOARP`, or has no IPv4 address, [`AppError::InterfaceHardwareAddressUnsupported`] when it
+/// has no usable Ethernet hardware address, or [`AppError::InterfaceEnumerationFailed`] when
+/// `getifaddrs(3)` fails.
+///
+/// # Panics
+///
+/// This function does not panic.
+pub fn discover_monitor_interface_identity(
+    interface_name: &str,
+) -> Result<MonitorInterfaceIdentity, AppError> {
+    interface_validation::validate_interface_name_for_linux_packet_socket(interface_name)?;
+    let records = macos_system_call::collect_interface_address_records()
+        .map_err(|source| AppError::InterfaceEnumerationFailed { source })?;
+    monitor_identity_from_records(&records, interface_name)
+}
+
 /// Resolves which interface name to use for scanning on macOS.
 ///
 /// When `explicit_interface_name` is [`Some`], that name is validated the same way as a direct scan
@@ -289,7 +351,9 @@ mod tests {
     use super::{
         ClassifiedScanInterface, classify_usable_scan_interfaces,
         enumerate_usable_arp_scan_interface_candidates, interface_flags_allow_arp_scanning,
+        monitor_identity_from_records,
     };
+    use crate::error::AppError;
     use crate::mac_address::MacAddress;
     use crate::macos_packet::{
         INTERFACE_FLAG_LOOPBACK, INTERFACE_FLAG_NO_ARP, INTERFACE_FLAG_UP, INTERFACE_TYPE_ETHERNET,
@@ -576,5 +640,113 @@ mod tests {
                 "resolved interface index should be non-zero, got: {candidate:?}"
             );
         }
+    }
+
+    #[test]
+    fn monitor_identity_keeps_every_ipv4_while_scan_keeps_the_first() {
+        // Arrange
+        let octets = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let first = Ipv4Addr::new(192, 168, 1, 20);
+        let second = Ipv4Addr::new(10, 1, 0, 8);
+        let records = vec![
+            ipv4_record("en0", flags_up(), first, Ipv4Addr::new(255, 255, 255, 0)),
+            ipv4_record("en0", flags_up(), second, Ipv4Addr::new(255, 255, 0, 0)),
+            ipv4_record("en0", flags_up(), first, Ipv4Addr::new(255, 255, 255, 0)),
+            link_record("en0", flags_up(), INTERFACE_TYPE_ETHERNET, octets),
+            ipv4_record(
+                "en1",
+                flags_up(),
+                Ipv4Addr::new(172, 16, 0, 1),
+                Ipv4Addr::new(255, 255, 255, 0),
+            ),
+            link_record(
+                "en1",
+                flags_up(),
+                INTERFACE_TYPE_ETHERNET,
+                [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            ),
+        ];
+
+        // Act
+        let classified = classify_usable_scan_interfaces(&records);
+        let identity = monitor_identity_from_records(&records, "en0");
+
+        // Assert
+        assert_eq!(
+            classified
+                .iter()
+                .find(|interface| interface.interface_name == "en0")
+                .expect("en0 should remain a usable scan interface")
+                .source_ipv4_address,
+            first,
+            "scan classification must keep the first IPv4 address"
+        );
+        let identity = identity.expect("en0 should produce a monitor identity");
+        assert_eq!(
+            identity.ipv4_addresses,
+            vec![second, first],
+            "monitoring must retain every AF_INET address on that name"
+        );
+        assert_eq!(identity.source_mac_address, MacAddress::from_octets(octets));
+        assert!(
+            !identity
+                .ipv4_addresses
+                .contains(&Ipv4Addr::new(172, 16, 0, 1))
+        );
+    }
+
+    #[test]
+    fn monitor_identity_rejects_missing_interface_and_loopback() {
+        // Arrange
+        let flags = INTERFACE_FLAG_UP.cast_unsigned() | INTERFACE_FLAG_LOOPBACK.cast_unsigned();
+        let records = vec![
+            ipv4_record(
+                "lo0",
+                flags,
+                Ipv4Addr::LOCALHOST,
+                Ipv4Addr::new(255, 0, 0, 0),
+            ),
+            link_record("lo0", flags, INTERFACE_TYPE_ETHERNET, [1, 2, 3, 4, 5, 6]),
+        ];
+
+        // Act
+        let missing = monitor_identity_from_records(&records, "en9");
+        let loopback = monitor_identity_from_records(&records, "lo0");
+
+        // Assert
+        assert!(
+            matches!(missing, Err(AppError::InterfaceLookupFailed { .. })),
+            "a name absent from the records should fail lookup, got: {missing:?}"
+        );
+        assert!(
+            matches!(loopback, Err(AppError::InterfaceRejectedForScanning { .. })),
+            "loopback must stay unusable for monitoring, got: {loopback:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_identity_rejects_all_zero_hardware_address() {
+        // Arrange
+        let records = vec![
+            ipv4_record(
+                "en9",
+                flags_up(),
+                Ipv4Addr::new(10, 0, 0, 9),
+                Ipv4Addr::new(255, 255, 255, 0),
+            ),
+            link_record("en9", flags_up(), INTERFACE_TYPE_ETHERNET, [0; 6]),
+        ];
+
+        // Act
+        let outcome = monitor_identity_from_records(&records, "en9");
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(AppError::InterfaceHardwareAddressUnsupported { .. })
+            ),
+            "an all-zero hardware address must be rejected, got: {outcome:?}"
+        );
     }
 }

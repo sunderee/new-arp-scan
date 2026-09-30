@@ -170,6 +170,9 @@ pub enum AppError {
         /// Which computed span overflowed.
         limit: ScanTimingLimit,
     },
+    /// A passive monitor listen window was zero. The monitor does not treat zero as an immediate
+    /// return the way a scan receive timeout can.
+    MonitorTimeoutRejected,
 }
 
 /// A scan-timing span that could not be represented without overflow.
@@ -372,6 +375,9 @@ fn write_late_app_error_variants(
             formatter,
             "IEEE 802.1Q service VLAN {service_vlan_identifier} needs a customer VLAN to wrap: set --vlan as well as --svlan"
         ),
+        AppError::MonitorTimeoutRejected => {
+            write!(formatter, "monitor timeout must be greater than zero")
+        }
         _ => write!(
             formatter,
             "unexpected application error variant during display formatting"
@@ -1303,6 +1309,26 @@ mod tests {
             "invalid backoff should be named, got: {backoff_display}"
         );
         assert!(bandwidth.source().is_none());
+    }
+
+    #[test]
+    fn display_rejects_zero_monitor_timeout_without_a_source() {
+        // Arrange
+        let application_error = AppError::MonitorTimeoutRejected;
+
+        // Act
+        let displayed = application_error.to_string();
+        let source = std::error::Error::source(&application_error);
+
+        // Assert
+        assert!(
+            displayed.contains("monitor timeout") && displayed.contains("zero"),
+            "zero monitor timeout should be named, got: {displayed}"
+        );
+        assert!(
+            source.is_none(),
+            "monitor timeout rejection has no underlying error, got: {source:?}"
+        );
     }
 
     #[test]

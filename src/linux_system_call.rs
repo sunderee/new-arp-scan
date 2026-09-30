@@ -350,6 +350,118 @@ pub fn poll_socket_readiness(
     Ok(ready)
 }
 
+/// One IPv4 address reported by `getifaddrs(3)` for a named interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceIpv4AddressRecord {
+    /// Kernel interface name (`ifa_name`).
+    pub interface_name: String,
+    /// IPv4 address stored at `ifa_addr`.
+    pub ipv4_address: std::net::Ipv4Addr,
+}
+
+/// Owns the `getifaddrs(3)` list head and releases it with `freeifaddrs(3)` on drop.
+struct InterfaceAddressListGuard(*mut libc::ifaddrs);
+
+impl Drop for InterfaceAddressListGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `self.0` was returned by `getifaddrs(3)` and must be released with
+            // `freeifaddrs(3)`.
+            unsafe {
+                libc::freeifaddrs(self.0);
+            }
+        }
+    }
+}
+
+/// Reads an IPv4 address from `sockaddr` when its family is `AF_INET`.
+///
+/// The four octets at `sin_addr.s_addr` are the address in wire order. `s_addr.to_be_bytes()` would
+/// permute those octets on little-endian hosts.
+fn ipv4_address_from_sockaddr(sockaddr: &libc::sockaddr) -> Option<std::net::Ipv4Addr> {
+    if libc::c_int::from(sockaddr.sa_family) != libc::AF_INET {
+        return None;
+    }
+
+    // SAFETY: `sockaddr` was validated as `AF_INET` and can be reinterpreted as `sockaddr_in`.
+    let socket_address_internet = unsafe {
+        std::ptr::from_ref(sockaddr)
+            .cast::<libc::sockaddr_in>()
+            .read_unaligned()
+    };
+    // SAFETY: `s_addr` is a four-octet network-order address in the POSIX `in_addr` ABI.
+    let octets: [u8; 4] = unsafe {
+        std::ptr::from_ref(&socket_address_internet.sin_addr.s_addr)
+            .cast::<[u8; 4]>()
+            .read_unaligned()
+    };
+    Some(std::net::Ipv4Addr::new(
+        octets[0], octets[1], octets[2], octets[3],
+    ))
+}
+
+/// Collects every `AF_INET` address reported by `getifaddrs(3)`.
+///
+/// Entries without a usable UTF-8 name, without an address, or with a family other than `AF_INET`
+/// are skipped. `SIOCGIFADDR` only returns one address per name; this list is what passive
+/// monitoring uses to see secondary addresses on the same interface. Alias names such as `eth0:1`
+/// remain separate `ifa_name` values and are not folded into `eth0`.
+///
+/// # Errors
+///
+/// Returns the last operating system error when `getifaddrs(3)` fails.
+///
+/// # Panics
+///
+/// This function does not panic.
+pub fn list_interface_ipv4_addresses() -> std::io::Result<Vec<InterfaceIpv4AddressRecord>> {
+    let mut list_head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs(3)` either writes a list head into `list_head` and returns 0, or returns
+    // a non-zero value and leaves `list_head` untouched.
+    let result = unsafe { libc::getifaddrs(std::ptr::addr_of_mut!(list_head)) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let _guard = InterfaceAddressListGuard(list_head);
+    let mut records = Vec::new();
+    let mut current = list_head;
+    while !current.is_null() {
+        // SAFETY: `current` points to a valid node until the terminating null pointer.
+        let node = unsafe { &*current };
+        if let Some(record) = interface_ipv4_address_record_from_ifaddrs(node) {
+            records.push(record);
+        }
+        current = node.ifa_next;
+    }
+
+    Ok(records)
+}
+
+/// Lowers one `getifaddrs(3)` node into an [`InterfaceIpv4AddressRecord`].
+///
+/// Returns [`None`] for a missing name, a non-UTF-8 name, a missing address, or a non-`AF_INET`
+/// address.
+fn interface_ipv4_address_record_from_ifaddrs(
+    node: &libc::ifaddrs,
+) -> Option<InterfaceIpv4AddressRecord> {
+    if node.ifa_name.is_null() || node.ifa_addr.is_null() {
+        return None;
+    }
+
+    // SAFETY: `ifa_name` is a non-null NUL-terminated interface name string per `getifaddrs(3)`.
+    let interface_name = unsafe { std::ffi::CStr::from_ptr(node.ifa_name) }
+        .to_str()
+        .ok()?
+        .to_string();
+    // SAFETY: `ifa_addr` is non-null here and points to a valid `sockaddr`.
+    let ipv4_address = ipv4_address_from_sockaddr(unsafe { &*node.ifa_addr })?;
+    Some(InterfaceIpv4AddressRecord {
+        interface_name,
+        ipv4_address,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::interface_index_from_name;
@@ -433,6 +545,75 @@ mod tests {
         assert_ne!(
             ready, 0,
             "POLLOUT should become ready quickly on an open datagram socket, got ready={ready}"
+        );
+    }
+
+    #[test]
+    fn reads_ipv4_octets_from_sockaddr_in_wire_order() {
+        // Arrange
+        let expected = std::net::Ipv4Addr::new(198, 51, 100, 24);
+        let mut socket_address_internet: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        socket_address_internet.sin_family =
+            libc::sa_family_t::try_from(libc::AF_INET).expect("AF_INET should fit sa_family_t");
+        unsafe {
+            std::ptr::addr_of_mut!(socket_address_internet.sin_addr.s_addr)
+                .cast::<[u8; 4]>()
+                .write(expected.octets());
+        }
+        let sockaddr = std::ptr::from_ref(&socket_address_internet).cast::<libc::sockaddr>();
+        // SAFETY: `sockaddr` points to a valid `sockaddr_in` for the lifetime of this test.
+        let sockaddr_ref = unsafe { &*sockaddr };
+
+        // Act
+        let outcome = super::ipv4_address_from_sockaddr(sockaddr_ref);
+
+        // Assert
+        assert_eq!(
+            outcome,
+            Some(expected),
+            "s_addr memory should be read as wire-order octets"
+        );
+    }
+
+    #[test]
+    fn ipv4_address_from_sockaddr_rejects_non_inet_family() {
+        // Arrange
+        let mut socket_address_internet: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        socket_address_internet.sin_family =
+            libc::sa_family_t::try_from(libc::AF_INET6).expect("AF_INET6 should fit sa_family_t");
+        let sockaddr = std::ptr::from_ref(&socket_address_internet).cast::<libc::sockaddr>();
+        // SAFETY: `sockaddr` points to a valid `sockaddr_in` for the lifetime of this test.
+        let sockaddr_ref = unsafe { &*sockaddr };
+
+        // Act
+        let outcome = super::ipv4_address_from_sockaddr(sockaddr_ref);
+
+        // Assert
+        assert_eq!(
+            outcome, None,
+            "AF_INET6 addresses are not IPv4 monitor identities"
+        );
+    }
+
+    #[test]
+    fn list_interface_ipv4_addresses_includes_loopback_localhost() {
+        // Act
+        let records = super::list_interface_ipv4_addresses()
+            .expect("getifaddrs should succeed on Linux test hosts");
+
+        // Assert
+        assert!(
+            records.iter().any(|record| {
+                record.interface_name == "lo"
+                    && record.ipv4_address == std::net::Ipv4Addr::LOCALHOST
+            }),
+            "loopback should report 127.0.0.1, got: {records:?}"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| !record.interface_name.is_empty()),
+            "every retained record should have a name, got: {records:?}"
         );
     }
 }

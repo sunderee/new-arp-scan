@@ -153,7 +153,7 @@ fn binary_root_help_exits_successfully() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("scan") && stdout.contains("interfaces"),
+        stdout.contains("scan") && stdout.contains("monitor") && stdout.contains("interfaces"),
         "root help should mention subcommands, got stdout: {stdout}"
     );
 }

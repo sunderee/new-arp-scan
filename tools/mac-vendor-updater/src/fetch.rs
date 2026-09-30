@@ -164,13 +164,39 @@ mod tests {
 
     #[cfg(unix)]
     fn write_executable(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(path, body).expect("write fake program");
-        let mut permissions = fs::metadata(path)
-            .expect("metadata for fake program")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("chmod fake program");
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(path)
+            .expect("create fake program");
+        file.write_all(body.as_bytes()).expect("write fake program");
+        file.sync_all()
+            .expect("sync fake program before it is executed");
+    }
+
+    /// Runs a script this process just created.
+    ///
+    /// `exec` of that script can return `ETXTBSY` once while the write is still visible to the
+    /// kernel. Retry only that spawn failure so an exit status or stdout assertion is about the
+    /// script, not a lost race.
+    #[cfg(unix)]
+    fn timestamp_from_script(program: &Path) -> Result<String, UpdaterError> {
+        let mut last_busy = None;
+        for _attempt in 0..8 {
+            match utc_timestamp_from_program(program, ["-u"]) {
+                Err(UpdaterError::RetrievedAtTimestampUnavailable { message })
+                    if message.contains("Text file busy") =>
+                {
+                    last_busy = Some(UpdaterError::RetrievedAtTimestampUnavailable { message });
+                }
+                other => return other,
+            }
+        }
+        Err(last_busy.expect("a text-file-busy spawn is stored before retries end"))
     }
 
     #[test]
@@ -321,16 +347,18 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         write_executable(&date, "#!/bin/sh\necho date failed >&2\nexit 1\n");
 
         // Act
-        let outcome = utc_timestamp_from_program(&date, ["-u"]);
+        let outcome = timestamp_from_script(&date);
 
         // Assert
-        assert!(
-            matches!(
-                outcome,
-                Err(UpdaterError::RetrievedAtTimestampUnavailable { .. })
-            ),
-            "date exit 1 must fail closed, got: {outcome:?}"
-        );
+        match outcome {
+            Err(UpdaterError::RetrievedAtTimestampUnavailable { message }) => {
+                assert!(
+                    message.contains("date failed"),
+                    "date exit 1 must report the script stderr, got: {message}"
+                );
+            }
+            other => panic!("date exit 1 must fail closed, got: {other:?}"),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -343,7 +371,7 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         write_executable(&date, "#!/bin/sh\nprintf '  2026-09-17T12:00:00Z \\n'\n");
 
         // Act
-        let timestamp = utc_timestamp_from_program(&date, ["-u"]).expect("trimmed timestamp");
+        let timestamp = timestamp_from_script(&date).expect("trimmed timestamp");
 
         // Assert
         assert_eq!(timestamp, "2026-09-17T12:00:00Z");
@@ -413,16 +441,15 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         write_executable(&date, "#!/bin/sh\nexit 0\n");
 
         // Act
-        let outcome = utc_timestamp_from_program(&date, ["-u"]);
+        let outcome = timestamp_from_script(&date);
 
         // Assert
-        assert!(
-            matches!(
-                outcome,
-                Err(UpdaterError::RetrievedAtTimestampUnavailable { .. })
-            ),
-            "empty date stdout must fail, got: {outcome:?}"
-        );
+        match outcome {
+            Err(UpdaterError::RetrievedAtTimestampUnavailable { message }) => {
+                assert_eq!(message, "date printed an empty timestamp");
+            }
+            other => panic!("empty date stdout must fail, got: {other:?}"),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -437,16 +464,18 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         write_executable(&date, &format!("#!/bin/sh\ncat '{}'\n", payload.display()));
 
         // Act
-        let outcome = utc_timestamp_from_program(&date, ["-u"]);
+        let outcome = timestamp_from_script(&date);
 
         // Assert
-        assert!(
-            matches!(
-                outcome,
-                Err(UpdaterError::RetrievedAtTimestampUnavailable { .. })
-            ),
-            "invalid UTF-8 from date must fail closed, got: {outcome:?}"
-        );
+        match outcome {
+            Err(UpdaterError::RetrievedAtTimestampUnavailable { message }) => {
+                assert!(
+                    message.contains("utf-8"),
+                    "invalid UTF-8 from date must be reported, got: {message}"
+                );
+            }
+            other => panic!("invalid UTF-8 from date must fail closed, got: {other:?}"),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -577,8 +577,14 @@ pub const DEFAULT_SCAN_PACING: Duration = Duration::ZERO;
 /// Default number of times each target address receives at least one address resolution request.
 pub const DEFAULT_SCAN_ATTEMPTS: NonZeroU64 = NonZeroU64::MIN;
 
+/// Default passive listen window.
+pub const DEFAULT_MONITOR_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A command dispatched from the binary after command-line parsing.
+///
+/// New commands may be added. Match with a wildcard outside this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApplicationCommand {
     /// Scan the given data-link interface’s local IPv4 subnet using address resolution protocol.
     Scan {
@@ -599,6 +605,29 @@ pub enum ApplicationCommand {
         /// IEEE 802.1Q tagging (customer and optional service tag), RFC 826 field overrides,
         /// Ethernet addressing, and RFC 1042 LLC/SNAP.
         wire: ScanWireOptions,
+    },
+    /// Listen for ARP on one interface without transmitting.
+    ///
+    /// `timeout` must be greater than zero. `interface_name` uses the same selection rules as
+    /// [`Self::Scan`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use new_arp_scan::{AppError, ApplicationCommand, run};
+    /// use std::time::Duration;
+    ///
+    /// let outcome = run(ApplicationCommand::Monitor {
+    ///     interface_name: Some("eth0".to_string()),
+    ///     timeout: Duration::ZERO,
+    /// });
+    /// assert!(matches!(outcome, Err(AppError::MonitorTimeoutRejected)));
+    /// ```
+    Monitor {
+        /// Operating system interface name, or [`None`] to select the single usable interface.
+        interface_name: Option<String>,
+        /// Positive listen window. Zero is rejected before a socket is opened.
+        timeout: Duration,
     },
     /// List interfaces that are usable for ARP scanning on Linux.
     UsableInterfacesList,
@@ -621,6 +650,38 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::num::NonZeroU64;
     use std::time::Duration;
+
+    #[test]
+    fn default_monitor_timeout_is_thirty_seconds() {
+        // Arrange
+        // Act
+        let timeout = super::DEFAULT_MONITOR_TIMEOUT;
+
+        // Assert
+        assert_eq!(
+            timeout,
+            Duration::from_secs(30),
+            "passive monitoring should default to a thirty-second listen"
+        );
+    }
+
+    #[test]
+    fn monitor_commands_compare_timeout_and_interface_only() {
+        // Arrange
+        let first = ApplicationCommand::Monitor {
+            interface_name: None,
+            timeout: super::DEFAULT_MONITOR_TIMEOUT,
+        };
+        let second = ApplicationCommand::Monitor {
+            interface_name: Some("eth0".to_string()),
+            timeout: Duration::from_millis(1),
+        };
+
+        // Act
+        // Assert
+        assert_ne!(first, second);
+        assert_eq!(first.clone(), first);
+    }
 
     #[test]
     fn default_scan_timeout_matches_three_seconds() {
