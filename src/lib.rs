@@ -13,6 +13,7 @@ mod interface_validation;
 mod ipv4_cidr;
 mod ipv4_subnet;
 mod link_layer_backend;
+mod monitor;
 mod scan_timing;
 mod scanner;
 
@@ -21,6 +22,8 @@ mod protocol_conformance;
 
 #[cfg(target_os = "linux")]
 mod linux_interface_discovery;
+#[cfg(target_os = "linux")]
+mod linux_monitor;
 #[cfg(target_os = "linux")]
 mod linux_packet;
 #[cfg(target_os = "linux")]
@@ -34,6 +37,8 @@ mod linux_system_call;
 mod macos_bpf_socket;
 #[cfg(target_os = "macos")]
 mod macos_interface_discovery;
+#[cfg(target_os = "macos")]
+mod macos_monitor;
 #[cfg(target_os = "macos")]
 mod macos_packet;
 #[cfg(target_os = "macos")]
