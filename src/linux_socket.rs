@@ -1,5 +1,10 @@
 //! Linux raw `AF_PACKET` socket initialization for ARP scanning.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the Linux packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 use std::ffi::CString;
 use std::mem::zeroed;
 use std::os::fd::OwnedFd;

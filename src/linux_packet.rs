@@ -1,4 +1,10 @@
 //! Linux packet socket constants and the `sockaddr_ll` layout used with `bind(2)`.
+
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the Linux packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 /// Linux packet socket address family (`AF_PACKET`).
 pub const SOCKET_ADDRESS_FAMILY_PACKET: libc::c_ushort = 17;
 

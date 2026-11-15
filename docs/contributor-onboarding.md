@@ -1,6 +1,6 @@
 # Contributor onboarding
 
-This guide gets a **fresh Linux (or non-Linux) environment** from zero to a passing **format, lint, and test** gate. Deeper conventions live in [CONTRIBUTING.md](../CONTRIBUTING.md).
+This guide gets a **fresh Linux (or non-Linux) environment** from zero to passing **format, lint, test, and dependency audit** gates. Deeper conventions live in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Tracked for release documentation: [GitHub issue #34](https://github.com/Bizjak-Tech-OU/new-arp-scan/issues/34).
 
@@ -44,10 +44,12 @@ make lint
 Which runs:
 
 1. `cargo fmt --all`
-2. `cargo clippy --all-targets -- -D warnings`
-3. clippy again with `--all-features` (fixture path in `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE`)
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. clippy again with `--workspace --all-features` (fixture path in `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE`)
 
 Fix warnings rather than adding `#[allow(...)]` unless you document why and record the exception in [DECISIONS.md](../DECISIONS.md) when required by [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+`make lint`, `make test`, and CI jobs set `CARGO_BUILD_WARNINGS=deny`; export it yourself when reproducing the same gate with direct Cargo commands. Plain Cargo builds retain the manifest's individual lint levels.
 
 ---
 
@@ -66,6 +68,22 @@ Which runs **`cargo test --workspace`**, **`cargo test --tests`**, then the fixt
 `make test` also rebuilds with `--features bundled-mac-vendors` against `tests/fixtures/ieee-mac-registry.txt` so the explicit → cwd → packaged search order is covered. That feature stays off for default `cargo test` / `cargo build`.
 
 Some Linux tests are **environment-sensitive** (loopback classification, raw/datagram sockets in sandboxes). If a failure looks environment-related, re-run on a normal Linux host or compare with [AGENTS.md](../AGENTS.md).
+
+---
+
+## Dependency audits
+
+Install the tools once, then run the audit gate alongside lint and tests:
+
+```bash
+cargo install cargo-audit --version 0.23.0
+cargo install cargo-deny --version 0.20.2
+make audit
+```
+
+This runs `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check`, matching the Ubuntu-only `supply-chain` CI job. Network access is required for the RustSec advisory database. License and crate-graph policy cover the root workspace, including the IEEE updater; `fuzz/` is audited for advisories only.
+
+Routine `cargo update` runs honor the three-day publish-age cooldown in `.cargo/config.toml`; keep an older eligible version while a newer release is pending.
 
 ---
 
@@ -97,6 +115,7 @@ If you work on packet paths or CI behavior, read:
 
 - [ ] `make lint` passes (or equivalent `cargo fmt` + `cargo clippy`).
 - [ ] `make test` passes (or equivalent workspace tests plus the fixture-bundled feature run).
+- [ ] `make audit` passes (`cargo audit`, `cargo audit --file fuzz/Cargo.lock`, and `cargo deny check`).
 - [ ] New behavior has tests and, for public API, doc examples.
 - [ ] Architectural changes recorded in **DECISIONS.md** when required by project rules.
 

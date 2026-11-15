@@ -1,5 +1,10 @@
 //! Discovers Linux network interfaces and IPv4 configuration for ARP scanning.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the Linux packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 use std::mem::zeroed;
 use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;

@@ -58,7 +58,13 @@ impl MonitorInterfaceIdentity {
     ///
     /// This function does not panic.
     #[must_use]
-    #[allow(dead_code)] // Binary search helper for callers that do not already hold a set.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "binary search helper for callers that do not already hold a set; only tests call it today"
+        )
+    )]
     pub(crate) fn contains_ipv4(&self, address: Ipv4Addr) -> bool {
         self.ipv4_addresses.binary_search(&address).is_ok()
     }

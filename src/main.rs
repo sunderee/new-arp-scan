@@ -1,5 +1,7 @@
 //! Binary entry point for the new ARP scan tool.
 
+use std::io::Write as _;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use clap::CommandFactory;
@@ -17,10 +19,7 @@ use new_arp_scan::mac_vendor_registry::MacVendorRegistry;
 fn main() {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if arguments.len() <= 1 {
-        let mut command = CliRoot::command();
-        if command.print_help().is_err() {
-            std::process::exit(1);
-        }
+        print_help_or_exit();
         return;
     }
 
@@ -37,94 +36,97 @@ fn main() {
                     };
                 let wire = scan_wire_options_from_arguments(&scan);
                 let rate_limit = rate_limit_from_scan_arguments(&scan);
-                match new_arp_scan::run(ApplicationCommand::Scan {
-                    interface_name: scan.interface_name,
-                    target_ipv4_address: scan.host_ipv4_address,
-                    timeout: Duration::from_millis(scan.timeout_milliseconds),
-                    pacing: Duration::from_millis(scan.pacing_milliseconds),
-                    attempts: std::num::NonZeroU64::new(scan.attempts).expect(
-                        "INVARIANT: clap rejects a zero --attempts before the application run path",
-                    ),
-                    rate_limit,
-                    wire,
-                }) {
-                    Ok(outcome) => {
-                        let mut standard_output = std::io::stdout().lock();
-                        let mut standard_error = std::io::stderr().lock();
-                        outcome
-                            .write_operator_streams_with_mac_vendor_registry(
-                                &mut standard_output,
-                                &mut standard_error,
-                                mac_vendor_registry.as_ref(),
-                            )
-                            .expect(
-                                "writing operator output to standard streams should succeed for a CLI binary",
-                            );
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        std::process::exit(1);
-                    }
-                }
+                let attempts = attempts_from_scan_arguments(&scan);
+                run_and_write_or_exit(
+                    ApplicationCommand::Scan {
+                        interface_name: scan.interface_name,
+                        target_ipv4_address: scan.host_ipv4_address,
+                        timeout: Duration::from_millis(scan.timeout_milliseconds),
+                        pacing: Duration::from_millis(scan.pacing_milliseconds),
+                        attempts,
+                        rate_limit,
+                        wire,
+                    },
+                    mac_vendor_registry.as_ref(),
+                );
             }
-            Some(CliSubcommand::Monitor(monitor)) => {
-                match new_arp_scan::run(ApplicationCommand::Monitor {
+            Some(CliSubcommand::Monitor(monitor)) => run_and_write_or_exit(
+                ApplicationCommand::Monitor {
                     interface_name: monitor.interface_name,
                     timeout: Duration::from_millis(monitor.timeout_milliseconds),
-                }) {
-                    Ok(outcome) => {
-                        let mut standard_output = std::io::stdout().lock();
-                        let mut standard_error = std::io::stderr().lock();
-                        outcome
-                            .write_operator_streams(&mut standard_output, &mut standard_error)
-                            .expect(
-                                "writing operator output to standard streams should succeed for a CLI binary",
-                            );
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        std::process::exit(1);
-                    }
-                }
-            }
+                },
+                None,
+            ),
             Some(CliSubcommand::Interfaces) => {
-                match new_arp_scan::run(ApplicationCommand::UsableInterfacesList) {
-                    Ok(outcome) => {
-                        let mut standard_output = std::io::stdout().lock();
-                        let mut standard_error = std::io::stderr().lock();
-                        outcome
-                            .write_operator_streams(&mut standard_output, &mut standard_error)
-                            .expect(
-                                "writing operator output to standard streams should succeed for a CLI binary",
-                            );
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        std::process::exit(1);
-                    }
-                }
+                run_and_write_or_exit(ApplicationCommand::UsableInterfacesList, None);
             }
-            None => {
-                let mut command = CliRoot::command();
-                command
-                    .print_help()
-                    .expect("printing help should succeed for a CLI binary");
-            }
+            None => print_help_or_exit(),
         },
         Err(error) => error.exit(),
     }
+}
+
+/// Runs `command` and writes its outcome to the process streams.
+///
+/// Exits with status 1 when the command fails or when a standard stream rejects the output.
+fn run_and_write_or_exit(
+    command: ApplicationCommand,
+    mac_vendor_registry: Option<&MacVendorRegistry>,
+) {
+    let outcome = match new_arp_scan::run(command) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let written = {
+        let mut standard_output = std::io::stdout().lock();
+        let mut standard_error = std::io::stderr().lock();
+        outcome.write_operator_streams_with_mac_vendor_registry(
+            &mut standard_output,
+            &mut standard_error,
+            mac_vendor_registry,
+        )
+    };
+    if let Err(error) = written {
+        exit_after_stream_failure("failed to write operator output", &error);
+    }
+}
+
+/// Prints the root help to standard output, exiting with status 1 when the stream rejects it.
+fn print_help_or_exit() {
+    let mut command = CliRoot::command();
+    if let Err(error) = command.print_help() {
+        exit_after_stream_failure("failed to print help", &error);
+    }
+}
+
+/// Reports a rejected write to a standard stream and ends the process with status 1.
+///
+/// A closed pipe (`EPIPE`) or a full device is an operator condition, so this path does not
+/// panic. The report is best-effort because standard error may be the stream that failed.
+fn exit_after_stream_failure(action: &str, error: &std::io::Error) -> ! {
+    let _ = writeln!(std::io::stderr(), "{action}: {error}");
+    std::process::exit(1);
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the clap value parser for --attempts has range 1.., so zero never reaches this call"
+)]
+fn attempts_from_scan_arguments(scan: &ScanArguments) -> NonZeroU64 {
+    NonZeroU64::new(scan.attempts)
+        .expect("INVARIANT: clap rejects a zero --attempts before the application run path")
 }
 
 fn rate_limit_from_scan_arguments(scan: &ScanArguments) -> Option<RateLimitedScanTiming> {
     let send_rate = if let Some(bits_per_second) = scan.bandwidth_bits_per_second {
         InterTargetSendRate::Bandwidth(bits_per_second)
     } else {
-        let milliseconds = scan.interval_milliseconds?;
-        InterTargetSendRate::Interval(
-            PositiveDuration::new(Duration::from_millis(milliseconds)).expect(
-                "INVARIANT: clap rejects a zero --interval-ms before the application run path",
-            ),
-        )
+        InterTargetSendRate::Interval(positive_interval_from_milliseconds(
+            scan.interval_milliseconds?,
+        ))
     };
     let backoff_factor = scan
         .retry_backoff_factor
@@ -132,34 +134,49 @@ fn rate_limit_from_scan_arguments(scan: &ScanArguments) -> Option<RateLimitedSca
     Some(RateLimitedScanTiming::new(send_rate, backoff_factor))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "the clap value parser for --interval-ms has range 1.., so zero never reaches this call"
+)]
+fn positive_interval_from_milliseconds(milliseconds: u64) -> PositiveDuration {
+    PositiveDuration::new(Duration::from_millis(milliseconds))
+        .expect("INVARIANT: clap rejects a zero --interval-ms before the application run path")
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the clap value parsers for --vlan and --svlan have range 0..=4095"
+)]
+fn vlan_identifier_from_cli_value(vlan_identifier: u16) -> Ieee8021qVlanIdentifier {
+    Ieee8021qVlanIdentifier::new(vlan_identifier).expect(
+        "INVARIANT: clap rejects VLAN identifiers above 4095 before the application run path",
+    )
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the clap value parsers for --pcp and --spcp have range 0..=7"
+)]
+fn priority_code_point_from_cli_value(priority_code_point: u8) -> Ieee8021qPriorityCodePoint {
+    Ieee8021qPriorityCodePoint::new(priority_code_point).expect(
+        "INVARIANT: clap rejects Priority Code Points above 7 before the application run path",
+    )
+}
+
 fn scan_wire_options_from_arguments(scan: &ScanArguments) -> ScanWireOptions {
     ScanWireOptions {
-        vlan_identifier: scan.vlan_identifier.map(|vlan_identifier| {
-            Ieee8021qVlanIdentifier::new(vlan_identifier).expect(
-                "clap should reject VLAN identifiers above 4095 before reaching the application run path",
-            )
-        }),
+        vlan_identifier: scan.vlan_identifier.map(vlan_identifier_from_cli_value),
         vlan_priority_code_point: scan.vlan_priority_code_point.map_or(
             Ieee8021qPriorityCodePoint::ZERO,
-            |priority_code_point| {
-                Ieee8021qPriorityCodePoint::new(priority_code_point).expect(
-                    "clap should reject Priority Code Points above 7 before reaching the application run path",
-                )
-            },
+            priority_code_point_from_cli_value,
         ),
         vlan_drop_eligible_indicator: scan.vlan_drop_eligible_indicator,
-        service_vlan_identifier: scan.service_vlan_identifier.map(|service_vlan_identifier| {
-            Ieee8021qVlanIdentifier::new(service_vlan_identifier).expect(
-                "clap should reject service VLAN identifiers above 4095 before reaching the application run path",
-            )
-        }),
+        service_vlan_identifier: scan
+            .service_vlan_identifier
+            .map(vlan_identifier_from_cli_value),
         service_vlan_priority_code_point: scan.service_vlan_priority_code_point.map_or(
             Ieee8021qPriorityCodePoint::ZERO,
-            |priority_code_point| {
-                Ieee8021qPriorityCodePoint::new(priority_code_point).expect(
-                    "clap should reject service Priority Code Points above 7 before reaching the application run path",
-                )
-            },
+            priority_code_point_from_cli_value,
         ),
         service_vlan_drop_eligible_indicator: scan.service_vlan_drop_eligible_indicator,
         sender_protocol_address: scan

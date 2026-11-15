@@ -133,9 +133,14 @@ fn convert_one_registry(input: RegistryCsvInput<'_>) -> Result<RegistrySection, 
                 line_number,
             });
         }
-        source_rows = source_rows.checked_add(1).expect(
+        #[expect(
+            clippy::expect_used,
+            reason = "each counted row occupies bytes of the in-memory CSV, whose length fits usize"
+        )]
+        let counted_rows = source_rows.checked_add(1).expect(
             "INVARIANT: source row count cannot overflow usize on a host that held the CSV",
         );
+        source_rows = counted_rows;
         if last_vendor_by_prefix
             .insert(prefix.clone(), vendor.to_string())
             .is_none()
@@ -153,6 +158,10 @@ fn convert_one_registry(input: RegistryCsvInput<'_>) -> Result<RegistrySection, 
     let mappings: Vec<(String, String)> = first_seen_order
         .into_iter()
         .map(|prefix| {
+            #[expect(
+                clippy::expect_used,
+                reason = "a prefix enters first_seen_order only when it is inserted into the map"
+            )]
             let vendor = last_vendor_by_prefix.remove(&prefix).expect(
                 "INVARIANT: every first-seen prefix was inserted into last_vendor_by_prefix",
             );
@@ -160,6 +169,10 @@ fn convert_one_registry(input: RegistryCsvInput<'_>) -> Result<RegistrySection, 
         })
         .collect();
     let emitted = mappings.len();
+    #[expect(
+        clippy::expect_used,
+        reason = "every emitted prefix came from at least one counted source row"
+    )]
     let duplicates_removed = source_rows
         .checked_sub(emitted)
         .expect("INVARIANT: unique prefixes cannot exceed accepted source rows");
@@ -314,6 +327,10 @@ fn render_ieee_oui_text(retrieved_at_utc: &str, sections: &[RegistrySection]) ->
     text
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "fmt::Write for String only appends to memory and never returns Err"
+)]
 fn write_line(text: &mut String, args: std::fmt::Arguments<'_>) {
     text.write_fmt(args)
         .expect("INVARIANT: writing to String cannot fail");
@@ -361,10 +378,8 @@ mod tests {
         (mam, mas, iab)
     }
 
-    #[test]
-    fn converts_quoted_utf8_whitespace_private_and_duplicate_rows() {
-        // Arrange
-        let mal = "\
+    /// MA-L rows covering separators, quoting, a tab, UTF-8, `Private`, and one duplicate prefix.
+    const QUOTED_UTF8_DUPLICATE_MAL_CSV: &str = "\
 Registry,Assignment,Organization Name,Organization Address\r
 MA-L,F4A475,Intel Corporate,Santa Clara\r
 MA-L,AA:BB:CC,Separated Prefix,Addr\r
@@ -379,8 +394,12 @@ MA-L,00BBAA,\"Shenzhen YOUHUA Technology Co., Ltd\t\",Addr\r
 MA-L,00AA99,\"He said \"\"Hello\"\"\",Addr\r
 MA-L,00AA88,Møller Elektronik,Århus\r
 ";
+
+    #[test]
+    fn converts_quoted_utf8_whitespace_private_and_duplicate_rows() {
+        // Arrange
         let (mam, mas, iab) = standard_companion_csvs();
-        let inputs = four_registry_inputs(mal, &mam, &mas, &iab);
+        let inputs = four_registry_inputs(QUOTED_UTF8_DUPLICATE_MAL_CSV, &mam, &mas, &iab);
 
         // Act
         let converted =

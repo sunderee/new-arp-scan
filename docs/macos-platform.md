@@ -46,9 +46,9 @@ macOS interfaces use names such as `en0` (typically the primary Ethernet/Wi-Fi),
 
    ```bash
    cargo fmt --all -- --check
-   cargo clippy --all-targets -- -D warnings
+   cargo clippy --workspace --all-targets -- -D warnings
    NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
-     cargo clippy --all-targets --all-features -- -D warnings
+     cargo clippy --workspace --all-targets --all-features -- -D warnings
    cargo test --workspace
    NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
      cargo test --workspace --features bundled-mac-vendors

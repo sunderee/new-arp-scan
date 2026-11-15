@@ -5,6 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+#[expect(
+    clippy::expect_used,
+    reason = "Cargo always sets CARGO_MANIFEST_DIR and OUT_DIR for a build script"
+)]
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_BUNDLED_MAC_VENDORS");

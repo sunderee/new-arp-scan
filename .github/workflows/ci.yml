@@ -19,14 +19,16 @@ jobs:
     # src/linux_socket.rs, src/linux_packet.rs, and the other `cfg(target_os = "linux")` modules
     # are never compiled by the macOS job, so without this job their code and tests ship unchecked.
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_WARNINGS: deny
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Install stable Rust toolchain
         # `rustup default stable` only *selects* the toolchain already in the runner image, which
-        # can lag the `rust-version` in Cargo.toml (macos-latest has shipped 1.97.1 against our
-        # 1.98 floor, failing the build before it starts). `rustup update stable` fetches the
-        # current release, matching the "always latest stable" policy in .claude/CLAUDE.md.
+        # can lag the `rust-version` in Cargo.toml and fail before the build starts.
+        # `rustup update stable` fetches the current release, matching the
+        # "always latest stable" policy in .claude/CLAUDE.md.
         run: |
           rustup update stable
           rustup default stable
@@ -38,11 +40,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint (clippy, warnings denied)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Lint bundled MAC vendor feature (clippy, warnings denied)
         env:
           NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Hermetic tests only, same as the macOS job: privileged ARP scans on the wire stay manual,
       # so this job never opens a raw AF_PACKET socket for a live scan. IEEE registry downloads
       # stay on `make update-mac-vendors`; tests use fixtures and `--from-dir`.
@@ -56,14 +58,16 @@ jobs:
   macos:
     name: macOS (format, lint, test)
     runs-on: macos-latest
+    env:
+      CARGO_BUILD_WARNINGS: deny
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Install stable Rust toolchain
         # `rustup default stable` only *selects* the toolchain already in the runner image, which
-        # can lag the `rust-version` in Cargo.toml (macos-latest has shipped 1.97.1 against our
-        # 1.98 floor, failing the build before it starts). `rustup update stable` fetches the
-        # current release, matching the "always latest stable" policy in .claude/CLAUDE.md.
+        # can lag the `rust-version` in Cargo.toml and fail before the build starts.
+        # `rustup update stable` fetches the current release, matching the
+        # "always latest stable" policy in .claude/CLAUDE.md.
         run: |
           rustup update stable
           rustup default stable
@@ -75,11 +79,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint (clippy, warnings denied)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Lint bundled MAC vendor feature (clippy, warnings denied)
         env:
           NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Hermetic tests only: privileged ARP scans on the wire stay manual (see CONTRIBUTING.md and
       # docs/linux-platform.md), so this job never opens a Berkeley Packet Filter device for a live
       # scan. IEEE registry downloads stay on `make update-mac-vendors`.
@@ -89,3 +93,25 @@ jobs:
         env:
           NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE: tests/fixtures/ieee-mac-registry.txt
         run: cargo test --workspace --features bundled-mac-vendors
+
+  supply-chain:
+    name: Supply chain (audit, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-audit@0.23.0,cargo-deny@0.20.2
+      # Separate from the hermetic platform jobs: these checks fetch the RustSec advisory DB.
+      - name: Audit dependencies
+        run: cargo audit
+      - name: Audit fuzz workspace lockfile
+        run: cargo audit --file fuzz/Cargo.lock
+      - name: Check dependency policy
+        run: cargo deny check

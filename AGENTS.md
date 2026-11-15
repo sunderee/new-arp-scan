@@ -9,8 +9,9 @@
 ## Learned Workspace Facts
 
 - The primary GitHub repository for this project is `Bizjak-Tech-OU/new-arp-scan`.
-- Continuous integration (`.github/workflows/ci.yml`) runs format, clippy (default and `--all-features` with `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt`), `cargo test --workspace`, and fixture-bundled feature tests on `ubuntu-latest` and `macos-latest` for every push and pull request to `master`; it never runs privileged ARP scans or IEEE registry downloads (those stay manual). The separate `static.yml` only deploys docs.
-- The `Makefile` `lint` target runs `cargo fmt --all`, then clippy without features, then clippy `--all-features` against the IEEE fixture path.
+- Continuous integration (`.github/workflows/ci.yml`) runs format, clippy `--workspace` (default and `--all-features` with `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt`), `cargo test --workspace`, and fixture-bundled feature tests on `ubuntu-latest` and `macos-latest` for every push and pull request to `master`; it never runs privileged ARP scans or IEEE registry downloads (those stay manual). An Ubuntu-only `supply-chain` job runs `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, and `cargo deny check`. The separate `static.yml` only deploys docs.
+- The `Makefile` `lint` target runs `cargo fmt --all`, then `cargo clippy --workspace --all-targets`, then clippy `--workspace --all-targets --all-features` against the IEEE fixture path.
+- The `Makefile` `audit` target runs `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check`.
 - The `Makefile` `test` target runs `cargo test --workspace`, `cargo test --tests`, then fixture-bundled `--features bundled-mac-vendors`.
 - The `Makefile` `build` target depends on `clean`, so `cargo clean` runs before `cargo build --release`.
 - The `Makefile` `coverage` target runs `cargo llvm-cov --workspace --all-targets --summary-only` unbundled and again with `--features bundled-mac-vendors` (requires `cargo install cargo-llvm-cov` once on the machine).
@@ -28,5 +29,5 @@
 - **Rust toolchain:** The project uses `edition = "2024"` which requires Rust ≥ 1.85. The update script ensures stable toolchain is installed. Use `cargo build` (not `make build`) to avoid the `cargo clean` that the Makefile prepends.
 - **Running the CLI:** The binary is at `./target/debug/new-arp-scan` after `cargo build`. A full ARP scan requires `CAP_NET_RAW` (run as root or with `sudo`). The CLI argument parsing and error paths can be exercised without privileges.
 - **Tests:** `make test` or `cargo test --workspace`. Two tests are environment-sensitive: `computes_prefix_length_for_slash_24_netmask` and `returns_rejection_when_scanning_loopback_interface_on_linux` may fail in containers where the loopback hardware type differs from a standard Linux host. Feature tests need `NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt cargo test --workspace --features bundled-mac-vendors`.
-- **Lint:** `make lint` runs `cargo fmt --all`, clippy, then clippy `--all-features` against the IEEE fixture. Clippy pedantic is enabled; newer Rust toolchains may surface additional lints not present when the code was last updated.
+- **Lint:** `make lint` runs `cargo fmt --all`, then `cargo clippy --workspace --all-targets` and the same with `--all-features` against the IEEE fixture. Clippy pedantic is enabled; newer Rust toolchains may surface additional lints not present when the code was last updated.
 - **No external services for scan/CI:** this is a systems CLI — no databases, Docker, or network services are needed for the hermetic gate. `make update-mac-vendors` is the only command that contacts IEEE (via system `curl`).
