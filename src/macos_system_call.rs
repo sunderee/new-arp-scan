@@ -6,6 +6,11 @@
 //! [`crate::macos_interface_discovery`]) stays pure and hermetically testable. Callers translate
 //! operating system errors into [`crate::error::AppError`] at higher layers.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the macOS packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 use std::ffi::CStr;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, OwnedFd};

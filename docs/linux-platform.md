@@ -38,24 +38,52 @@ If the process lacks the capability, the kernel returns **permission denied**; t
 
 ## Testing environment setup
 
-1. **Toolchain**  
-   Use **current stable Rust** with **edition 2024** (see `Cargo.toml` and [README](../README.md) requirements).
+1. **Toolchain** — current **stable Rust** with **edition 2024** (see `rust-version` in `Cargo.toml`).
 
-2. **Gate before pushing**  
-   From the repository root:
+2. **Gate before pushing** (the same checks CI runs on `ubuntu-latest`):
 
    ```bash
-   make lint    # cargo fmt --all, clippy, then clippy --all-features against the IEEE fixture
-   make test    # cargo test --workspace, cargo test --tests, then fixture-bundled feature tests
+   cargo fmt --all -- --check
+   CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets -- -D warnings
+   NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+     CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets --all-features -- -D warnings
+   CARGO_BUILD_WARNINGS=deny cargo test --workspace
+   NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
+     CARGO_BUILD_WARNINGS=deny cargo test --workspace --features bundled-mac-vendors
    ```
 
-   Or invoke the same `cargo` commands manually.
+   `make lint` / `make test` run equivalent commands (`make lint` rewrites formatting instead of only checking it). `make test` also runs `cargo test --tests`. CI jobs and those Make targets set `CARGO_BUILD_WARNINGS=deny`; `make build` does not. The Ubuntu `supply-chain` job matches `make audit`: `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check` (install once: `cargo install cargo-audit --version 0.23.0` and `cargo install cargo-deny --version 0.20.2`; network required for the advisory DB). IEEE registry downloads stay on `make update-mac-vendors` (system `curl`; not run in CI). Privileged live scans stay manual.
 
 3. **Coverage (optional)**  
    `make coverage` uses `cargo llvm-cov`. Install once (`cargo install cargo-llvm-cov`) and add `llvm-tools-preview` if prompted (`rustup component add llvm-tools-preview`).
 
 4. **Environment-sensitive tests**  
-   A small number of Linux tests depend on **host network stack details** (for example loopback hardware classification). If they fail in an unusual container, compare with [AGENTS.md](../AGENTS.md) notes and re-run on a stock Linux host when validating merges.
+   A small number of Linux tests depend on **host network stack details**. `computes_prefix_length_for_slash_24_netmask` and `returns_rejection_when_scanning_loopback_interface_on_linux` can fail in containers where the loopback hardware type differs from a stock Linux host. Tests that open `AF_INET` datagram or raw sockets can fail with permission denied in locked-down sandboxes; that is a host restriction, not a product bug. Compare with [AGENTS.md](../AGENTS.md) and re-run on a stock Linux host when validating merges.
+
+5. **Manual acceptance scan** (needs `CAP_NET_RAW`, typically via `sudo`; touches your LAN; not part of CI):
+
+   ```bash
+   cargo build
+   sudo ./target/debug/new-arp-scan interfaces
+   sudo ./target/debug/new-arp-scan scan --interface eth0
+   sudo ./target/debug/new-arp-scan scan --interface eth0 --host 192.168.1.50
+   sudo ./target/debug/new-arp-scan scan --interface eth0 --mac-vendor-file ieee-oui.txt
+   sudo ./target/debug/new-arp-scan monitor --interface eth0 --timeout-ms 1000
+   ```
+
+   Use the interface name from `interfaces` on your host. Discovered hosts print as `<IPv4> <MAC>`, or `<IPv4> <MAC> <vendor>` when a mapping file is loaded, followed by a `scan complete: …` timing line on standard error. Generate `ieee-oui.txt` first with `make update-mac-vendors`. Vendor loading happens before the raw socket open, so a missing or invalid mapping file fails without needing `CAP_NET_RAW`. `monitor` does not load that file. A listen prints `conflict`, `observed`, and `duplicate-ip` lines, or `no conflicts observed`, then one `monitor complete: …` line on standard error. `tcpdump` should show no frames sent by the monitor process.
+
+---
+
+## Verifying frames on the wire
+
+While a scan runs, capture ARP on the same interface in another terminal:
+
+```bash
+sudo tcpdump -ni eth0 arp
+```
+
+You should see the tool's broadcast ARP **requests** and the **replies** from live hosts. Wireshark with an `arp` display filter works the same way. This is optional manual validation and is not part of automated tests.
 
 ---
 
@@ -75,5 +103,6 @@ Exact `ip`/`nft` commands vary by distribution and policy; treat the above as a 
 
 ## Further reading
 
-- Linux `packet(7)`, `capabilities(7)`, `networkdevice(7)`  
+- Linux `packet(7)`, `capabilities(7)`, `networkdevice(7)`
+- [macOS platform support](./macos-platform.md) for the Berkeley Packet Filter counterpart
 - Repository [DECISIONS.md](../DECISIONS.md) for past Linux and socket-related choices

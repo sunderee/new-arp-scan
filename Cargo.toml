@@ -2,7 +2,7 @@
 name = "new-arp-scan"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 license = "AGPL-3.0-only"
 
 [workspace]
@@ -12,6 +12,26 @@ members = ["tools/mac-vendor-updater"]
 [workspace.dependencies]
 # Used only by tools/mac-vendor-updater so IEEE CSV parsing never enters the privileged scan crate.
 csv = { version = "1.4", default-features = false }
+
+[workspace.lints.rust]
+# deny, not forbid: libc FFI lives in linux_*/macos_*/interface_validation (see DECISIONS.md).
+# Those modules `#![allow(unsafe_code)]`. The updater forbids unsafe entirely.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+unused_workspace_dependencies = "deny"
 
 [features]
 default = []
@@ -28,11 +48,7 @@ libc = "0.2"
 # features, and with them the `rusty-fork` and `tempfile` transitive dependencies; `std` is the
 # only feature the invariant tests need.
 [dev-dependencies]
-proptest = { version = "1.11", default-features = false, features = ["std"] }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
-[lints.rust]
-warnings = "deny"
-unsafe_op_in_unsafe_fn = "deny"
-
-[lints.clippy]
-pedantic = "warn"
+[lints]
+workspace = true

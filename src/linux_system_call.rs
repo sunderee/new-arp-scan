@@ -3,6 +3,11 @@
 //! All foreign-function-interface calls are concentrated here. Callers translate operating
 //! system errors into [`crate::error::AppError`] at higher layers.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the Linux packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::linux_packet::ethernet_protocol_host_to_network_order;

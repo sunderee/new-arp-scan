@@ -101,8 +101,7 @@ impl ScanTimingSummary {
 }
 
 fn elapsed_milliseconds_saturating_u64(duration: Duration) -> u64 {
-    let millis = duration.as_millis();
-    u64::try_from(millis.min(u128::from(u64::MAX))).expect("value is bounded by u64::MAX")
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Outcome of an address resolution scan (discovered hosts and non-fatal warnings).
@@ -313,7 +312,7 @@ impl ApplicationOutcome {
     ///     .write_operator_streams(&mut standard_output, &mut standard_error)
     ///     .expect("in-memory writes should succeed");
     /// assert_eq!(standard_output, b"no hosts found\n");
-    /// assert!(standard_error.is_empty());
+    /// assert_eq!(standard_error, b"");
     /// ```
     pub fn write_operator_streams(
         &self,

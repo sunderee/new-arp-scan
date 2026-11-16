@@ -18,13 +18,13 @@ Lightweight records of architectural choices. Each entry follows the same shape.
 
 **Consequences:** Any future crate addition must come with a fresh `DECISIONS.md` entry and clear justification.
 
-## 2026-05-10 — Strict warnings and Clippy pedantic via Cargo lints
+## 2026-05-10 — Strict warnings and Clippy pedantic (revised 2026-11-15)
 
-**Decision:** Configure `[lints.rust]` with warnings denied and `unsafe_op_in_unsafe_fn` denied; enable Clippy `pedantic` at warning level in `Cargo.toml`, and run `cargo fmt --all` followed by `cargo clippy --all-targets -- -D warnings` in local and continuous integration workflows (`Makefile` target `lint`).
+**Decision:** Reverse the original blanket `warnings = "deny"` manifest setting. Configure workspace Rust, Clippy, and Cargo lints in `Cargo.toml`: deny `unsafe_code` and `unsafe_op_in_unsafe_fn` and unused dependencies, and warn on Clippy `all`, `pedantic`, and the selected panic/debug restrictions. The root package inherits this policy; the updater mirrors it because Cargo cannot combine inheritance with its stricter `unsafe_code = "forbid"`. Enforce zero warnings at the gate with job-level `CARGO_BUILD_WARNINGS=deny` in CI and the same prefix on `make lint` / `make test` Cargo invocations (not `make build`); `make lint` retains formatting and both Clippy passes with `-D warnings`.
 
-**Reason:** Treat warnings as errors early so regressions do not accumulate; pedantic catches foot-guns consistent with project review standards.
+**Reason:** The constitution requires warnings to block CI without making ordinary Cargo builds fail on lints introduced by the next stable compiler. Specific safety and dependency errors remain denied in the manifest.
 
-**Consequences:** New pedantic findings block merges until addressed or explicitly documented with a rare, justified allowance.
+**Consequences:** New warnings block merges until addressed or explicitly justified. Do not restore blanket warnings denial in manifests or source, or commit `build.warnings`; the warning gate belongs to CI and Make commands.
 
 ## 2026-05-11 — `libc` for Linux packet sockets and ioctl
 
@@ -76,7 +76,7 @@ Lightweight records of architectural choices. Each entry follows the same shape.
 
 ## 2026-05-15 — Clippy: `cast_possible_truncation` after bounded CIDR prefix parse
 
-**Decision:** Allow `clippy::cast_possible_truncation` when converting the parsed decimal `u32` prefix to `u8` immediately after rejecting values greater than `32`.
+**Decision:** `#[expect(clippy::cast_possible_truncation)]` when converting the parsed decimal `u32` prefix to `u8` immediately after rejecting values greater than `32`.
 
 **Reason:** The guard makes truncation impossible; a `u8::try_from` error branch was logically unreachable and obscured the real control flow.
 
@@ -276,3 +276,27 @@ Resolved fields are encoded through [`AddressResolutionRequestLayout`](src/addre
 **Reason:** Operators need to see a foreign station claiming one of this host's IPv4 addresses without turning that into a scan result or into a full address-conflict-detection implementation.
 
 **Consequences:** External matches on `ApplicationCommand` and `ApplicationOutcome` need a wildcard. Privileged live listens stay manual and are not part of CI. `scan` request-ignore behavior remains as decided on 2026-08-15.
+
+## 2026-11-15 — Existing libc FFI exception to `unsafe_code = "forbid"`
+
+**Decision:** Keep the root crate's existing `libc` FFI in the `linux_*`, `macos_*`, and `interface_validation` modules. Set workspace `unsafe_code = "deny"` (not `forbid`) and `unsafe_op_in_unsafe_fn = "deny"`. Those FFI modules `#![allow(unsafe_code)]` with a reason pointing here. The updater continues to forbid unsafe code. A dedicated FFI crate split is outside this change.
+
+**Reason:** A root-wide forbid would reject the existing platform backends. Deny plus module-level allow still fails new unsafe outside those files. Moving those boundaries into a separate crate would be an architectural change beyond this toolchain and dependency refresh.
+
+**Consequences:** This records an exception to the constitution's separate-crate safety policy for the existing FFI only. Every unsafe block still requires an auditable `// SAFETY:` explanation. The updater duplicates the workspace lint tables because Cargo rejects local overrides with `[lints] workspace = true`; keep those tables aligned.
+
+## 2026-11-15 — Three-day dependency cooldown and supply-chain gate
+
+**Decision:** Keep `[registry] global-min-publish-age = "3 days"` in `.cargo/config.toml`. Routine root and separate fuzz-workspace updates honor that cooldown. Add `make audit` (`cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check`) and a matching Ubuntu-only supply-chain CI job with read-only repository permissions. Pin that job's installer to `taiki-e/install-action` commit `ab49d3c64680143e184118bed66a46419fc15519` (`v2.90.5`) and the tools to `cargo-audit@0.23.0` and `cargo-deny@0.20.2`.
+
+**Reason:** Delaying fresh dependency versions reduces exposure to malicious publishes, while advisory and license checks enforce the existing dependency policy on every push and pull request to `master`.
+
+**Consequences:** Versions still in cooldown remain at an eligible older version. Do not bypass the cooldown for routine upgrades; any urgent security exception must be explicit and limited to the affected version. Advisory checks need network access to the RustSec database and stay separate from the hermetic platform tests. The fuzz workspace remains outside the root CI dependency policy.
+
+## 2026-11-15 — Defer `thiserror`; retain hand-written `AppError`
+
+**Decision:** Retain the hand-written `AppError` variants and their `Display` / `std::error::Error` implementations. Defer the constitution's preferred `thiserror` migration; add neither `thiserror` nor `anyhow` in this refresh.
+
+**Reason:** The existing typed errors serve the current API. A derive migration would change Rust sources and expand the dependency graph beyond the toolchain, lint-policy, and supply-chain work authorized here.
+
+**Consequences:** Continue extending the existing typed error model when needed. Any future error-library migration requires its own scoped change and dependency review.

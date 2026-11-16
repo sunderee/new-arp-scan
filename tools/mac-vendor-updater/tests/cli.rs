@@ -19,31 +19,31 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn unique_dir() -> PathBuf {
+fn unique_dir() -> std::io::Result<PathBuf> {
     let stamp = UNIQUE.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "mac-vendor-updater-int-{}-{stamp}",
         std::process::id()
     ));
-    fs::create_dir_all(&path).expect("temp directory");
-    path
+    fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 fn updater_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mac-vendor-updater"))
 }
 
-fn csv_text(relative: &str) -> String {
-    fs::read_to_string(fixtures_dir().join(relative)).expect("read fixture CSV")
+fn csv_text(relative: &str) -> std::io::Result<String> {
+    fs::read_to_string(fixtures_dir().join(relative))
 }
 
 #[test]
 fn valid_fixtures_convert_byte_stably_and_parse() {
     // Arrange
-    let mal = csv_text("valid/oui.csv");
-    let mam = csv_text("valid/mam.csv");
-    let mas = csv_text("valid/oui36.csv");
-    let iab = csv_text("valid/iab.csv");
+    let mal = csv_text("valid/oui.csv").expect("read MA-L fixture CSV");
+    let mam = csv_text("valid/mam.csv").expect("read MA-M fixture CSV");
+    let mas = csv_text("valid/oui36.csv").expect("read MA-S fixture CSV");
+    let iab = csv_text("valid/iab.csv").expect("read IAB fixture CSV");
     let inputs = [
         mac_vendor_updater::RegistryCsvInput {
             registry: mac_vendor_updater::IeeeMacRegistry::MaL,
@@ -89,7 +89,7 @@ fn valid_fixtures_convert_byte_stably_and_parse() {
 #[test]
 fn cli_from_dir_writes_output_without_network() {
     // Arrange
-    let dir = unique_dir();
+    let dir = unique_dir().expect("temp directory");
     let output = dir.join("ieee-oui.txt");
 
     // Act
@@ -193,7 +193,7 @@ fn cli_from_dir_without_value_exits_one() {
 #[test]
 fn malformed_fixtures_do_not_clobber_existing_output() {
     // Arrange
-    let dir = unique_dir();
+    let dir = unique_dir().expect("temp directory");
     let output = dir.join("ieee-oui.txt");
     fs::write(&output, "keep-me\n").expect("seed output");
 
@@ -222,7 +222,7 @@ fn cli_with_fake_curl_on_path_fails_without_touching_output() {
     // Arrange
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = unique_dir();
+    let dir = unique_dir().expect("temp directory");
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).expect("bin dir");
     let curl = bin.join("curl");
