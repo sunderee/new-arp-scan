@@ -41,20 +41,20 @@ macOS interfaces use names such as `en0` (typically the primary Ethernet/Wi-Fi),
 
 ## Testing environment setup
 
-1. **Toolchain** — current **stable Rust** with **edition 2024** (see `Cargo.toml`).
+1. **Toolchain** — current **stable Rust** with **edition 2024** (see `rust-version` in `Cargo.toml`).
 2. **Gate before pushing** (the same checks CI runs on `macos-latest`):
 
    ```bash
    cargo fmt --all -- --check
-   cargo clippy --workspace --all-targets -- -D warnings
+   CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets -- -D warnings
    NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
-     cargo clippy --workspace --all-targets --all-features -- -D warnings
-   cargo test --workspace
+     CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets --all-features -- -D warnings
+   CARGO_BUILD_WARNINGS=deny cargo test --workspace
    NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
-     cargo test --workspace --features bundled-mac-vendors
+     CARGO_BUILD_WARNINGS=deny cargo test --workspace --features bundled-mac-vendors
    ```
 
-   `make lint` / `make test` run equivalent commands (`make lint` rewrites formatting instead of only checking it). IEEE registry downloads stay on `make update-mac-vendors` (system `curl` plus `date -u`; not run in CI).
+   `make lint` / `make test` run equivalent commands (`make lint` rewrites formatting instead of only checking it). CI jobs and those Make targets set `CARGO_BUILD_WARNINGS=deny`; `make build` does not. IEEE registry downloads stay on `make update-mac-vendors` (system `curl` plus `date -u`; not run in CI). The Ubuntu `supply-chain` job matches `make audit` (`cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check`).
 
 3. **Manual acceptance scan** (needs root / BPF access, touches your LAN):
 

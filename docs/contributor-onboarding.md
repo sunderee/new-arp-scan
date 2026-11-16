@@ -8,7 +8,7 @@ Tracked for release documentation: [GitHub issue #34](https://github.com/Bizjak-
 
 ## Prerequisites
 
-- **Rust**: stable toolchain with `cargo`, `rustc`, `rustfmt`, and `clippy` (edition **2024**; see `Cargo.toml`).
+- **Rust**: stable toolchain with `cargo`, `rustc`, `rustfmt`, and `clippy` (edition **2024**; see `rust-version` in `Cargo.toml`).
 - **Git** and a clone of [Bizjak-Tech-OU/new-arp-scan](https://github.com/Bizjak-Tech-OU/new-arp-scan).
 - **GNU Make** (optional): the [Makefile](../Makefile) wraps common `cargo` invocations.
 
