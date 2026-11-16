@@ -1,5 +1,10 @@
 //! Validates Linux network interface names before issuing syscalls.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for interface-name ioctl buffers; see DECISIONS.md 2026-11-15"
+)]
+
 use crate::error::AppError;
 
 /// Matches Linux `IFNAMSIZ` from `linux/if.h`.

@@ -84,11 +84,14 @@ The binary uses a minimal, deterministic exit code contract:
 | `make build` | `cargo clean` then `cargo build --release` |
 | `make test` | `cargo test --workspace`, `cargo test --tests`, then fixture-bundled `--features bundled-mac-vendors` |
 | `make lint` | `cargo fmt --all`, then clippy with and without `--all-features` (`-D warnings`) |
+| `make audit` | `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check` (install once: `cargo install cargo-audit --version 0.23.0` and `cargo install cargo-deny --version 0.20.2`; network required for the advisory DB) |
 | `make coverage` | `cargo llvm-cov --workspace --all-targets --summary-only` unbundled and fixture-bundled (install once: `cargo install cargo-llvm-cov`; first run may need `rustup component add llvm-tools-preview`) |
 | `make update-mac-vendors` | Fetch IEEE MA-L / MA-M / MA-S / IAB CSVs with `curl` and atomically write `ieee-oui.txt` (network; not run in CI) |
 | `make clean` | `cargo clean` |
 
 Run the same commands manually if you prefer not to use Make.
+
+`make lint`, `make test`, and CI jobs set `CARGO_BUILD_WARNINGS=deny`. CI runs lint and tests on Linux and macOS, plus an Ubuntu-only supply-chain job matching `make audit`.
 
 ## Contributing
 

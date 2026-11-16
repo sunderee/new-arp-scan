@@ -41,6 +41,7 @@ If you believe `unsafe` is required, record the architectural justification in `
 - **Standard library first.** Adding a crate is an architectural decision, not a shortcut.
 - Any new dependency requires an entry in **`DECISIONS.md`**: what problem it solves, why `std` is insufficient, and what alternatives were rejected.
 - Keep `[dependencies]` minimal and audit upgrades deliberately.
+- Routine dependency updates honor the three-day publish-age cooldown in `.cargo/config.toml`; leave newer releases pending until eligible.
 
 ## Testing
 
@@ -53,19 +54,34 @@ If you believe `unsafe` is required, record the architectural justification in `
 
 ## Formatting and linting
 
-- Run **`make lint`** (formats with `cargo fmt --all`, then runs `cargo clippy --all-targets -- -D warnings`), or invoke those commands yourself.
+- Run **`make lint`** (formats with `cargo fmt --all`, then runs `cargo clippy --workspace --all-targets -- -D warnings`), or invoke those commands yourself.
 - Fix issues rather than silencing them.
-- Undocumented `#[allow(...)]` attributes are not acceptable unless paired with a comment explaining why the suppression is correct **and** a `DECISIONS.md` entry.
+- Undocumented `#[allow(...)]` attributes are not acceptable unless paired with a comment explaining why the suppression is correct **and** a `DECISIONS.md` entry. Prefer `#[expect(...)]` when the lint should return.
+
+CI jobs and the `make lint` / `make test` Cargo invocations set `CARGO_BUILD_WARNINGS=deny`. `make build` does not. Keep blanket warning denial out of Cargo manifests and source; plain Cargo builds use the declared individual lint levels.
+
+## Dependency audits
+
+Install the audit tools once, then run the supply-chain gate alongside `make lint` and `make test`:
+
+```sh
+cargo install cargo-audit --version 0.23.0
+cargo install cargo-deny --version 0.20.2
+make audit
+```
+
+`make audit` runs `cargo audit`, `cargo audit --file fuzz/Cargo.lock`, then `cargo deny check`. The separate Ubuntu `supply-chain` job in `.github/workflows/ci.yml` runs the same checks on every push and pull request to `master`. These checks need network access to the RustSec advisory database; platform tests remain hermetic. License and crate-graph policy cover the root workspace, including the IEEE updater; `fuzz/` is audited for advisories only because it is a separate workspace.
 
 ## Platform testing
 
 The crate supports **Linux** (`AF_PACKET` raw sockets) and **macOS** (Berkeley Packet Filter). Continuous integration runs the hermetic gate on **both `ubuntu-latest` and `macos-latest`** on every push and pull request to `master` (`.github/workflows/ci.yml`). Both jobs are needed: the `cfg(target_os = "linux")` modules (`src/linux_socket.rs`, `src/linux_packet.rs`, and friends) are not compiled at all on macOS, and vice versa. Each job runs:
 
 ```sh
+export CARGO_BUILD_WARNINGS=deny
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
-  cargo clippy --all-targets --all-features -- -D warnings
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=tests/fixtures/ieee-mac-registry.txt \
   cargo test --workspace --features bundled-mac-vendors

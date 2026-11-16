@@ -560,10 +560,12 @@ fn write_claimed_hardware_addresses(
 
 #[cfg(test)]
 mod tests {
+    use super::DuplicateIpClaim;
     use super::MONITOR_DISTINCT_RECORD_LIMIT;
     use super::MonitorListenRequest;
     use super::PassiveArpAggregator;
     use super::PassiveArpClass;
+    use super::PassiveArpRecord;
     use super::classify_passive_arp;
     use super::listen_for_passive_arp;
     use super::monitor_completion_summary;
@@ -859,8 +861,8 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 1)
         );
         assert_eq!(outcome.records[0].count, 1);
-        assert!(outcome.duplicate_ip_claims.is_empty());
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.duplicate_ip_claims, [] as [DuplicateIpClaim; 0]);
+        assert_eq!(outcome.warnings, [] as [String; 0]);
         assert_eq!(
             stdout_text(&outcome),
             "conflict: request 192.168.1.10 is-at 02:00:00:00:00:02 target 00:00:00:00:00:00 192.168.1.1 count 1\n"
@@ -930,8 +932,8 @@ mod tests {
         let outcome = run(vec![frame], &[local_ip(), second_local_ip()]);
 
         // Assert
-        assert!(outcome.records.is_empty());
-        assert!(outcome.duplicate_ip_claims.is_empty());
+        assert_eq!(outcome.records, [] as [PassiveArpRecord; 0]);
+        assert_eq!(outcome.duplicate_ip_claims, [] as [DuplicateIpClaim; 0]);
         assert_eq!(stdout_text(&outcome), "no conflicts observed\n");
     }
 
@@ -952,7 +954,7 @@ mod tests {
         // Assert
         assert_eq!(outcome.records[0].classification, PassiveArpClass::Observed);
         assert_eq!(outcome.records[0].count, 1);
-        assert!(outcome.duplicate_ip_claims.is_empty());
+        assert_eq!(outcome.duplicate_ip_claims, [] as [DuplicateIpClaim; 0]);
         assert_eq!(
             stdout_text(&outcome),
             "observed: request 192.168.1.50 is-at 02:00:00:00:00:09 target 00:00:00:00:00:00 192.168.1.1 count 1\nno conflicts observed\n"
@@ -1089,7 +1091,7 @@ mod tests {
                 .count(),
             2
         );
-        assert!(outcome.duplicate_ip_claims.is_empty());
+        assert_eq!(outcome.duplicate_ip_claims, [] as [DuplicateIpClaim; 0]);
         assert!(!stdout_text(&outcome).contains("duplicate-ip:"));
         assert!(!stdout_text(&outcome).contains("no conflicts observed"));
     }
@@ -1154,7 +1156,7 @@ mod tests {
         );
 
         // Assert
-        assert!(outcome.records.is_empty());
+        assert_eq!(outcome.records, [] as [PassiveArpRecord; 0]);
         assert_eq!(
             outcome.warnings,
             vec![
@@ -1213,7 +1215,7 @@ mod tests {
         assert_eq!(outcome.records.len(), 1);
         assert_eq!(outcome.records[0].count, 3);
         assert_eq!(outcome.records[0].classification, PassiveArpClass::Conflict);
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.warnings, [] as [String; 0]);
     }
 
     #[test]
@@ -1247,7 +1249,7 @@ mod tests {
         assert_eq!(endpoint.returned.get(), 5);
         assert_eq!(outcome.records.len(), 1);
         assert_eq!(outcome.records[0].count, 5);
-        assert!(endpoint.sent.borrow().is_empty());
+        assert_eq!(*endpoint.sent.borrow(), [] as [Vec<u8>; 0]);
     }
 
     #[test]
@@ -1271,7 +1273,7 @@ mod tests {
         // Assert
         assert_eq!(clock.unreadable_waits(), vec![Duration::from_millis(10)]);
         assert_eq!(stdout_text(&outcome), "no conflicts observed\n");
-        assert!(endpoint.sent.borrow().is_empty());
+        assert_eq!(*endpoint.sent.borrow(), [] as [Vec<u8>; 0]);
     }
 
     #[test]
@@ -1337,7 +1339,7 @@ mod tests {
             ),
             "a wait failure must stay a poll error, got: {poll_error:?}"
         );
-        assert!(waiting.sent.borrow().is_empty());
+        assert_eq!(*waiting.sent.borrow(), [] as [Vec<u8>; 0]);
         assert!(
             matches!(
                 &receive_error,
@@ -1385,7 +1387,7 @@ mod tests {
         // Assert
         assert_eq!(outcome.records.len(), 1);
         assert_eq!(outcome.records[0].count, u64::MAX);
-        assert!(outcome.duplicate_ip_claims.is_empty());
+        assert_eq!(outcome.duplicate_ip_claims, [] as [DuplicateIpClaim; 0]);
         assert_eq!(
             outcome.warnings,
             vec![super::PASSIVE_MONITOR_TRUNCATION_WARNING.to_string()]
@@ -1620,8 +1622,8 @@ mod tests {
         let outcome = run(vec![frame], &[local_ip(), second_local_ip()]);
 
         // Assert
-        assert!(outcome.records.is_empty());
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.records, [] as [PassiveArpRecord; 0]);
+        assert_eq!(outcome.warnings, [] as [String; 0]);
         assert_eq!(stdout_text(&outcome), "no conflicts observed\n");
     }
 

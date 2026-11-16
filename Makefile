@@ -1,4 +1,4 @@
-.PHONY: build test lint clean coverage fuzz update-mac-vendors
+.PHONY: build test lint audit clean coverage fuzz update-mac-vendors
 
 BUNDLED_MAC_VENDOR_FILE ?= tests/fixtures/ieee-mac-registry.txt
 
@@ -6,14 +6,19 @@ build: clean
 	cargo build --release
 
 test:
-	cargo test --workspace
-	cargo test --tests
-	NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=$(BUNDLED_MAC_VENDOR_FILE) cargo test --workspace --features bundled-mac-vendors
+	CARGO_BUILD_WARNINGS=deny cargo test --workspace
+	CARGO_BUILD_WARNINGS=deny cargo test --tests
+	NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=$(BUNDLED_MAC_VENDOR_FILE) CARGO_BUILD_WARNINGS=deny cargo test --workspace --features bundled-mac-vendors
 
 lint:
 	cargo fmt --all
-	cargo clippy --all-targets -- -D warnings
-	NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=$(BUNDLED_MAC_VENDOR_FILE) cargo clippy --all-targets --all-features -- -D warnings
+	CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets -- -D warnings
+	NEW_ARP_SCAN_BUNDLED_MAC_VENDOR_FILE=$(BUNDLED_MAC_VENDOR_FILE) CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+audit:
+	cargo audit
+	cargo audit --file fuzz/Cargo.lock
+	cargo deny check
 
 coverage:
 	cargo llvm-cov --workspace --all-targets --summary-only

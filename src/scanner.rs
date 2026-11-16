@@ -476,7 +476,10 @@ where
 
 /// Positional adapter so scripted tests can pass timing fields without building a request value.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "positional adapter that keeps scripted tests free of request-value setup"
+)]
 fn collect_scripted_scan<E, C>(
     endpoint: &mut E,
     targets: &[Ipv4Addr],
@@ -1481,6 +1484,7 @@ mod arp_reply_acceptance_tests {
 #[cfg(test)]
 mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
     use super::ArpReplyAcceptance;
+    use super::DiscoveredHost;
     use super::ScanTransmitContext;
     use super::collect_scan_over_endpoint;
     use super::collect_scripted_scan;
@@ -1908,7 +1912,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         .expect("scripted endpoint should not fail");
 
         // Assert
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
         assert_eq!(outcome.warnings.len(), 1);
         assert!(
             outcome.warnings[0].contains("reserved by RFC 5494"),
@@ -2165,7 +2169,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         .expect("send failure is a warning, not a fatal error");
 
         // Assert
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
         assert_eq!(outcome.warnings.len(), 1);
         assert!(
             outcome.warnings[0].contains("failed to send ARP request")
@@ -2198,7 +2202,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         .expect("scripted endpoint should not fail");
 
         // Assert
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
         assert!(
             outcome.warnings.is_empty(),
             "unparseable Ethernet is capture noise, not a malformed ARP warning, got: {:?}",
@@ -2235,7 +2239,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         .expect("scripted endpoint should not fail");
 
         // Assert
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
         assert_eq!(outcome.warnings.len(), 1);
         assert!(
             outcome.warnings[0].contains("malformed Ethernet/ARP")
@@ -2270,7 +2274,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         .expect("scripted endpoint should not fail");
 
         // Assert
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
         assert!(
             outcome.warnings.is_empty(),
             "RARP should be ignored without a malformation warning, got: {:?}",
@@ -2308,7 +2312,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             outcome.discovered_hosts.is_empty(),
             "ExactTarget must not record a different sender IPv4"
         );
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.warnings, [] as [String; 0]);
     }
 
     #[test]
@@ -2396,7 +2400,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             outcome.discovered_hosts[0].media_access_control_address,
             sender_mac
         );
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.warnings, [] as [String; 0]);
     }
 
     #[test]
@@ -2436,7 +2440,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
         // Assert
         assert_eq!(outcome.discovered_hosts.len(), 1);
         assert_eq!(outcome.discovered_hosts[0].ipv4_address, target_ip);
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.warnings, [] as [String; 0]);
     }
 
     #[test]
@@ -2475,7 +2479,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             ),
             "Ethernet II padding of 1473 octets must exceed the 1500-octet MAC client data maximum, got: {outcome:?}"
         );
-        assert!(endpoint.sent.borrow().is_empty());
+        assert_eq!(*endpoint.sent.borrow(), [] as [Vec<u8>; 0]);
     }
 
     #[test]
@@ -2880,7 +2884,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
             outcome.discovered_hosts[0].media_access_control_address,
             sender_mac
         );
-        assert!(outcome.warnings.is_empty());
+        assert_eq!(outcome.warnings, [] as [String; 0]);
     }
 
     #[test]
@@ -3033,7 +3037,7 @@ mod collect_scan_over_endpoint_vlan_and_capture_noise_tests {
 
 #[cfg(test)]
 mod rate_limited_scan_timing_tests {
-    use super::{ArpReplyAcceptance, ScanTransmitContext, collect_scripted_scan};
+    use super::{ArpReplyAcceptance, DiscoveredHost, ScanTransmitContext, collect_scripted_scan};
     use crate::address_resolution_protocol::{
         ARP_OPERATION_REPLY, build_address_resolution_request_ethernet_frame,
     };
@@ -3390,7 +3394,7 @@ mod rate_limited_scan_timing_tests {
                 "failed to send ARP request to 192.168.1.12: injected send failure".to_string(),
             ]
         );
-        assert!(outcome.discovered_hosts.is_empty());
+        assert_eq!(outcome.discovered_hosts, [] as [DiscoveredHost; 0]);
     }
 
     #[test]
@@ -3418,7 +3422,7 @@ mod rate_limited_scan_timing_tests {
         .expect("scripted endpoint should not fail");
 
         // Assert
-        assert!(clock.sleeps().is_empty());
+        assert_eq!(clock.sleeps(), [] as [Duration; 0]);
         let sent_targets: Vec<Ipv4Addr> = link
             .sent
             .borrow()
@@ -3487,7 +3491,7 @@ mod rate_limited_scan_timing_tests {
         .expect("an empty target list should still receive");
 
         // Assert
-        assert!(link.sent.borrow().is_empty());
+        assert_eq!(*link.sent.borrow(), [] as [Vec<u8>; 0]);
         assert_eq!(clock.unreadable_waits(), vec![Duration::from_millis(5)]);
     }
 
@@ -3548,7 +3552,7 @@ mod rate_limited_scan_timing_tests {
             ),
             "Duration::MAX past Instant::now must fail closed, got: {outcome:?}"
         );
-        assert!(link.sent.borrow().is_empty());
+        assert_eq!(*link.sent.borrow(), [] as [Vec<u8>; 0]);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# Constitution §6 enables clippy::unwrap_used / expect_used / panic / dbg_macro at warn.
+# Tests are allowed to panic and unwrap; production code is not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true

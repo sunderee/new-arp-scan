@@ -162,41 +162,322 @@ mod tests {
         path
     }
 
+    /// Publishes an executable script at `path` without ever opening `path` for writing.
+    ///
+    /// The body goes to a sibling temp file that is synced and closed before it is renamed onto
+    /// `path`, the same order as `write::replace_file_atomically`. A reader of `path` therefore
+    /// sees the whole script or no file at all.
+    ///
+    /// The rename does not remove every `ETXTBSY`. Another test thread can fork a child while the
+    /// temp file is still open here; that child holds the write descriptor until its own `exec`,
+    /// and the kernel refuses to `exec` this inode in the meantime. Callers run the script
+    /// through [`retry_text_file_busy`] for that reason.
     #[cfg(unix)]
     fn write_executable(path: &Path, body: &str) {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        let file_name = path.file_name().expect("fake program path names a file");
+        let temp_path = path.with_file_name(format!(".{}.tmp", file_name.to_string_lossy()));
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o755)
-            .open(path)
-            .expect("create fake program");
+            .open(&temp_path)
+            .expect("create fake program temp file");
         file.write_all(body.as_bytes()).expect("write fake program");
         file.sync_all()
             .expect("sync fake program before it is executed");
+        drop(file);
+        fs::rename(&temp_path, path).expect("rename fake program into place");
     }
 
-    /// Runs a script this process just created.
+    /// Spawn attempts allowed for a script this process just created.
+    const TEXT_FILE_BUSY_ATTEMPTS: usize = 8;
+
+    /// Reports whether `error` is a failed spawn that the kernel refused with `ETXTBSY`.
     ///
-    /// `exec` of that script can return `ETXTBSY` once while the write is still visible to the
-    /// kernel. Retry only that spawn failure so an exit status or stdout assertion is about the
-    /// script, not a lost race.
+    /// A curl process that ran and exited carries `status: Some(_)`, and a `date` process that
+    /// ran and exited reports `exit status …`, so neither is mistaken for a lost spawn race even
+    /// when its own stderr says `Text file busy`.
+    fn is_text_file_busy_spawn(error: &UpdaterError) -> bool {
+        match error {
+            UpdaterError::CurlFailed {
+                status: None,
+                stderr,
+                ..
+            } => stderr.contains("Text file busy"),
+            UpdaterError::RetrievedAtTimestampUnavailable { message } => {
+                !message.starts_with("exit status") && message.contains("Text file busy")
+            }
+            _ => false,
+        }
+    }
+
+    /// Runs `operation`, which executes a script this process just created.
+    ///
+    /// `exec` of that script can return `ETXTBSY` while a child forked by another test thread
+    /// still holds the descriptor the script was written through. Only that spawn failure is
+    /// retried, at most [`TEXT_FILE_BUSY_ATTEMPTS`] times and without sleeping, so an exit status
+    /// or stdout assertion is about the script and not a lost race. When every attempt is busy,
+    /// the last busy error is returned.
+    ///
+    /// This is test-only. Production `run_command` reports `ETXTBSY` on the first failure.
+    fn retry_text_file_busy<T>(
+        mut operation: impl FnMut() -> Result<T, UpdaterError>,
+    ) -> Result<T, UpdaterError> {
+        let mut outcome = operation();
+        for _attempt in 1..TEXT_FILE_BUSY_ATTEMPTS {
+            if !outcome.as_ref().is_err_and(is_text_file_busy_spawn) {
+                break;
+            }
+            outcome = operation();
+        }
+        outcome
+    }
+
     #[cfg(unix)]
     fn timestamp_from_script(program: &Path) -> Result<String, UpdaterError> {
-        let mut last_busy = None;
-        for _attempt in 0..8 {
-            match utc_timestamp_from_program(program, ["-u"]) {
-                Err(UpdaterError::RetrievedAtTimestampUnavailable { message })
-                    if message.contains("Text file busy") =>
-                {
-                    last_busy = Some(UpdaterError::RetrievedAtTimestampUnavailable { message });
-                }
-                other => return other,
-            }
+        retry_text_file_busy(|| utc_timestamp_from_program(program, ["-u"]))
+    }
+
+    #[cfg(unix)]
+    fn fetch_with_script(destination_dir: &Path, curl_program: &Path) -> Result<(), UpdaterError> {
+        retry_text_file_busy(|| fetch_official_csvs_with_curl(destination_dir, curl_program))
+    }
+
+    fn busy_curl_spawn() -> UpdaterError {
+        UpdaterError::CurlFailed {
+            url: "https://standards-oui.ieee.org/oui/oui.csv".to_string(),
+            status: None,
+            stderr: "Text file busy (os error 26)".to_string(),
         }
-        Err(last_busy.expect("a text-file-busy spawn is stored before retries end"))
+    }
+
+    #[test]
+    fn retry_returns_the_first_success_after_busy_spawns() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(busy_curl_spawn())
+            } else {
+                Ok(calls)
+            }
+        });
+
+        // Assert
+        assert!(
+            matches!(outcome, Ok(3)),
+            "two busy spawns then a success must return the success, got: {outcome:?}"
+        );
+        assert_eq!(calls, 3, "no attempt may follow the first success");
+    }
+
+    #[test]
+    fn retry_runs_a_successful_operation_once() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Ok::<(), UpdaterError>(())
+        });
+
+        // Assert
+        assert!(
+            outcome.is_ok(),
+            "success must pass through, got: {outcome:?}"
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_retries_a_busy_date_spawn() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(UpdaterError::RetrievedAtTimestampUnavailable {
+                    message: "Text file busy (os error 26)".to_string(),
+                })
+            } else {
+                Ok("2026-09-17T12:00:00Z")
+            }
+        });
+
+        // Assert
+        assert!(
+            matches!(outcome, Ok("2026-09-17T12:00:00Z")),
+            "a busy date spawn must be retried, got: {outcome:?}"
+        );
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn retry_does_not_retry_curl_missing() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Err::<(), _>(UpdaterError::CurlMissing)
+        });
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(UpdaterError::CurlMissing)),
+            "a missing curl must stay CurlMissing, got: {outcome:?}"
+        );
+        assert_eq!(calls, 1, "a missing program is not a lost spawn race");
+    }
+
+    #[test]
+    fn retry_does_not_retry_a_curl_exit_status_that_mentions_text_file_busy() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Err::<(), _>(UpdaterError::CurlFailed {
+                url: "https://standards-oui.ieee.org/oui/oui.csv".to_string(),
+                status: Some(22),
+                stderr: "Text file busy".to_string(),
+            })
+        });
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(UpdaterError::CurlFailed {
+                    status: Some(22),
+                    ..
+                })
+            ),
+            "a curl that ran and exited 22 must stay exit 22, got: {outcome:?}"
+        );
+        assert_eq!(
+            calls, 1,
+            "an exit status is the script's answer, not a race"
+        );
+    }
+
+    #[test]
+    fn retry_does_not_retry_a_date_exit_status_that_mentions_text_file_busy() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Err::<(), _>(UpdaterError::RetrievedAtTimestampUnavailable {
+                message: "exit status exit status: 1; stderr: Text file busy".to_string(),
+            })
+        });
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(UpdaterError::RetrievedAtTimestampUnavailable { .. })
+            ),
+            "a date that ran and failed must stay a date failure, got: {outcome:?}"
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_does_not_retry_other_spawn_failures() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Err::<(), _>(UpdaterError::CurlFailed {
+                url: "https://standards-oui.ieee.org/oui/oui.csv".to_string(),
+                status: None,
+                stderr: "Permission denied (os error 13)".to_string(),
+            })
+        });
+
+        // Assert
+        assert!(
+            matches!(outcome, Err(UpdaterError::CurlFailed { status: None, .. })),
+            "a permission failure must pass through, got: {outcome:?}"
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_surfaces_text_file_busy_when_every_attempt_is_busy() {
+        // Arrange
+        let mut calls = 0_usize;
+
+        // Act
+        let outcome = retry_text_file_busy(|| {
+            calls += 1;
+            Err::<(), _>(busy_curl_spawn())
+        });
+
+        // Assert
+        match outcome {
+            Err(UpdaterError::CurlFailed {
+                status: None,
+                stderr,
+                ..
+            }) => assert!(
+                stderr.contains("Text file busy"),
+                "exhausted retries must still report the busy spawn, got: {stderr}"
+            ),
+            other => panic!("exhausted retries must fail with the busy spawn, got: {other:?}"),
+        }
+        assert_eq!(
+            calls, TEXT_FILE_BUSY_ATTEMPTS,
+            "retries must stop at the attempt bound"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_leaves_only_the_runnable_script() {
+        // Arrange
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_dir();
+        let script = dir.join("date");
+
+        // Act
+        write_executable(&script, "#!/bin/sh\nprintf 'ready\\n'\n");
+
+        // Assert
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            [std::ffi::OsString::from("date")],
+            "the temp file must be renamed away"
+        );
+        let mode = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o100, 0, "the script must be owner-executable");
+        assert_eq!(
+            timestamp_from_script(&script).expect("script runs"),
+            "ready"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -227,7 +508,7 @@ mod tests {
         write_executable(&curl, "#!/bin/sh\necho denied >&2\nexit 22\n");
 
         // Act
-        let outcome = fetch_official_csvs_with_curl(&dir.join("csv"), &curl);
+        let outcome = fetch_with_script(&dir.join("csv"), &curl);
 
         // Assert
         assert!(
@@ -277,7 +558,7 @@ cp \"{}\"/\"$(basename \"$out\")\" \"$out\"\n",
         let dest = dir.join("csv");
 
         // Act
-        fetch_official_csvs_with_curl(&dest, &curl).expect("fake curl should copy sidecars");
+        fetch_with_script(&dest, &curl).expect("fake curl should copy sidecars");
 
         // Assert
         let args = fs::read_to_string(dir.join("curl-args.txt")).expect("curl argv log");

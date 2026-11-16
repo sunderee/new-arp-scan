@@ -237,8 +237,10 @@ fn parse_decimal_prefix_length(raw: &str, diagnostic_source: &str) -> Result<u8,
         });
     }
 
-    // `parsed` is at most 32 after the check above, so the cast cannot truncate.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`parsed` is at most 32 after the check above, so the cast cannot truncate"
+    )]
     let prefix_length = parsed as u8;
     Ok(prefix_length)
 }

@@ -8,6 +8,11 @@
 //! system calls live in
 //! [`crate::macos_system_call`]; the record-walking here is pure byte-slice arithmetic.
 
+#![allow(
+    unsafe_code,
+    reason = "libc FFI for the macOS packet backend; see DECISIONS.md 2026-11-15"
+)]
+
 use std::mem::offset_of;
 use std::os::fd::OwnedFd;
 
